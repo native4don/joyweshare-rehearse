@@ -6,6 +6,10 @@
   background: var(--bg);
 }
 * { box-sizing: border-box; }
+/* No zooming at all, by double tap or by pinch: the player is tapped all the time, and bigger
+   notes come from Säädöt › Nuotin koko (Eero, 2026-10-19, #92). Set on every element, not just
+   the root, as browsers stop looking up the tree at a scrolling box. */
+* { touch-action: pan-x pan-y; }
 body { margin: 0; }
 a { color: var(--accent); }
 h1 { font-size: 1.35rem; margin: 0.2rem 0; letter-spacing: -0.01em; }
@@ -50,7 +54,7 @@ button.link { border: none; background: none; color: var(--accent); padding: 0.2
 .sung-mark { display: inline-flex; vertical-align: -2px; margin-left: 0.35rem; color: var(--accent); }
 .badge { font-size: 0.72rem; font-weight: 700; background: var(--accent-soft); color: var(--accent); border-radius: 1rem;
   padding: 0.15rem 0.55rem; margin-right: 0.9rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.segmented.order { margin: 0 0 0.8rem auto; }
+.segmented.order { grid-template-columns: repeat(3, 1fr); width: 270px; height: 40px; margin: 0 0 0.8rem auto; }
 .segmented.order button { min-height: 0; border: none; background: none; padding: 0; color: var(--fg); font-size: 14px;
   border-radius: 999px; }
 .songs .date { color: var(--muted); font-size: 0.85rem; margin-right: 1.1rem; white-space: nowrap; }
@@ -64,12 +68,23 @@ button.link { border: none; background: none; color: var(--accent); padding: 0.2
 .setlists select.picked { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
 .others-heading { font-size: 1.05rem; margin: 1.2rem 0 0.5rem; }
 .setlist-note { margin-top: 0.6rem; }
+.staging-hint { margin-top: 0.8rem; }
+.songs select.move { flex: none; max-width: 9rem; margin-right: 0.8rem; font: inherit; font-size: 0.9rem;
+  padding: 0.45rem 0.5rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+  color: var(--fg); }
 .setlist-edit .songs { margin-bottom: 0.6rem; }
 .setlist-edit .songs label { flex: 1; display: flex; align-items: center; gap: 0.6rem; padding: 0.7rem 0.9rem; }
 .setlist-edit .songs button { font-size: 1.2rem; padding: 0 0.8rem; }
 .setlist-edit .songs button:disabled { opacity: 0.3; }
 .request-form label { display: block; margin: 0.6rem 0; font-size: 0.92rem; color: var(--muted); }
 .request-form label input, .request-form label textarea { display: block; margin-top: 0.25rem; color: var(--fg); }
+.pdf-list { list-style: none; padding: 0; margin: 0.4rem 0 0.8rem; border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden; }
+.pdf-list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.4rem 0.5rem 0.9rem; }
+.pdf-list li + li { border-top: 1px solid var(--line); }
+.pdf-list .pdf-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.pdf-list .pdf-error { display: block; font-size: 0.85rem; }
+.pdf-list button { font-size: 1.1rem; padding: 0 0.6rem; text-decoration: none; }
 .requests { margin-top: 1.5rem; }
 .requests h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
 .requested { list-style: none; padding: 0; margin: 0 0 0.8rem; background: var(--surface); border: 1px solid var(--line);
@@ -88,11 +103,13 @@ button.link { border: none; background: none; color: var(--accent); padding: 0.2
 .request-list .flag-tag { color: #a3470a; font-weight: 600; margin-right: 0.3rem; }
 .request-list .flag-what { display: block; color: var(--muted); font-size: 0.9rem; }
 footer { margin-top: 1.5rem; }
+.site-credit { color: var(--muted); font-size: 0.85rem; margin-top: 1rem; }
+.narrow .site-credit { text-align: center; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 0.4rem 1rem 1rem; margin: 1rem 0; }
 .card textarea, .card input[type="text"] { width: 100%; font: inherit; padding: 0.5rem; border: 1px solid var(--line);
   border-radius: 0.4rem; margin-bottom: 0.4rem; }
 .card .row input[type="text"] { width: auto; flex: 1; margin: 0; }
-.join { background: var(--accent-soft); border-color: var(--accent-soft); padding: 0.2rem 1rem 1rem; }
+.join, .install { background: var(--accent-soft); border-color: var(--accent-soft); padding: 0.2rem 1rem 1rem; }
 .members { list-style: none; padding: 0; }
 .members li { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 0.3rem 0; }
 
@@ -120,6 +137,8 @@ footer { margin-top: 1.5rem; }
 /* "Kaikki": one line that slides sideways; the page itself never scrolls. */
 .player.one-line { height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }
 .player.one-line .score-scroll { flex: 1; min-height: 0; }
+/* Measures the window with the address bar shown, so the line stays put as it hides (#93). */
+.small-viewport { position: fixed; top: 0; left: 0; width: 0; height: 100svh; visibility: hidden; pointer-events: none; }
 .score-scroll.single-line { overflow: hidden; background: #fff; touch-action: none; user-select: none; cursor: grab; }
 .score-scroll.single-line .score-wrap { max-width: none; width: max-content; margin: 0; will-change: transform; }
 /* While a zoom waits to re-wrap the lines the drawing is just stretched, wider
@@ -161,15 +180,22 @@ footer { margin-top: 1.5rem; }
 .own-name { font-size: 16px; font-weight: 700; }
 .dock .play { width: 52px; height: 52px; flex: none; border-radius: 50%; background: var(--accent); color: #fff;
   display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(42, 95, 171, 0.35); }
-.dock .settings { width: 44px; height: 44px; flex: none; border-radius: 50%; color: var(--muted);
+.dock .settings { position: relative; width: 44px; height: 44px; flex: none; border-radius: 50%; color: var(--muted);
   display: flex; align-items: center; justify-content: center; }
 .dock .settings:hover { background: var(--chip); }
 .dock .settings.on { background: var(--accent-soft); color: var(--accent); }
+/* This song can be heard sung (#84): a dot on Säädöt, and the Ääni row lit up once it opens. */
+.sung-dot { position: absolute; top: 7px; right: 7px; width: 10px; height: 10px; border-radius: 50%;
+  background: #e0457b; box-shadow: 0 0 0 2px #fff; }
+.setting.lit .segmented button { position: relative; }
+.setting.lit .sung-dot { top: 4px; right: 4px; }
+.setting.lit { border-radius: 12px; box-shadow: 0 0 0 2px var(--accent); background: var(--accent-soft); padding: 4px 6px; margin: 0 -6px; }
 
 /* ---------- Player: Säädöt ---------- */
 .backdrop { position: fixed; inset: 0; z-index: 2; background: rgba(15, 20, 30, 0.16); }
 .sheet { position: fixed; left: 0; right: 0; z-index: 3; background: #fff; border-radius: 22px 22px 0 0;
-  box-shadow: 0 -10px 30px rgba(20, 30, 50, 0.12); padding: 8px 20px 6px; max-width: 40rem; margin: 0 auto; }
+  box-shadow: 0 -10px 30px rgba(20, 30, 50, 0.12); padding: 8px 20px 6px; max-width: 40rem; margin: 0 auto;
+  overflow-y: auto; overscroll-behavior: contain; }
 .handle { width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 10px; }
 .section-label { font-size: 11.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted);
   margin-bottom: 8px; }
@@ -177,13 +203,16 @@ footer { margin-top: 1.5rem; }
 .divider + .section-label { margin-bottom: 2px; }
 .row-label { font-size: 15px; white-space: nowrap; }
 .segmented { display: grid; gap: 2px; background: var(--chip); border-radius: 999px; padding: 3px; }
-.segmented.modes { grid-template-columns: repeat(4, 1fr); }
-.segmented.modes button { height: 34px; font-size: 13.5px; white-space: nowrap; padding: 0 2px; border-radius: 999px; }
+/* Each mode as wide as its label, the spare room shared: "Mine up front" no longer squeezes into a quarter. */
+.segmented.modes { grid-template-columns: repeat(4, auto); }
+.segmented.modes button { height: 34px; font-size: 13.5px; white-space: nowrap; padding: 0 8px; border-radius: 999px; }
 .segmented.two { grid-template-columns: 1fr 1fr; width: 180px; height: 40px; }
+.segmented.three { grid-template-columns: repeat(3, 1fr); width: 220px; height: 40px; }
+.segmented.three button { font-size: 14px; border-radius: 999px; }
 .segmented.two button { font-size: 14px; border-radius: 999px; }
-/* The EN | FI switch (JoyWeShare): small, beside the page's other links. */
+/* The EN | FI switch: small, beside the page's other links. */
 .segmented.language { width: 96px; height: 32px; }
-.segmented.language button { min-height: 0; padding: 0; font-size: 13px; }
+.segmented.language button { min-height: 0; border: none; background: none; padding: 0; color: var(--fg); font-size: 13px; }
 .narrow .segmented.language { margin: 1.25rem auto 0; }
 .segmented button.on { background: #fff; color: var(--accent); font-weight: 600; box-shadow: 0 1px 3px rgba(20, 30, 50, 0.15); }
 .mode-hint { font-size: 12.5px; color: var(--muted); text-align: center; margin: 7px 0 2px; }
@@ -246,3 +275,21 @@ footer { margin-top: 1.5rem; }
 .home h2 { font-size: 1.3rem; margin: 1.6rem 0 0.3rem; }
 .open-songs { text-align: left; margin: 1rem 0 0; }
 .members { margin-top: 2rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+
+/* The admin page's usage card (eeron-omat-taskit#72). */
+.usage-lines { list-style: none; padding: 0; margin: 0; }
+.usage-lines li { display: flex; justify-content: space-between; gap: 1rem; padding: 0.2rem 0; border-bottom: 1px solid var(--line); }
+.usage .usage-choir { font-weight: 600; margin: 0.8rem 0 0.2rem; }
+.usage details { margin-top: 0.8rem; }
+.usage summary { font-weight: 600; cursor: pointer; }
+.usage details ul { padding-left: 1.1rem; }
+.usage details li { padding: 0.2rem 0; font-size: 0.92rem; }
+/* Säädöt › Lisäasetukset (#117): closed until tapped. */
+.advanced { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 4px; }
+.advanced summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: space-between;
+  color: var(--muted); font-size: 15px; list-style: none; }
+.advanced summary::-webkit-details-marker { display: none; }
+.advanced summary::after { content: "›"; font-size: 22px; line-height: 1; transition: transform 0.15s; }
+.advanced[open] summary::after { transform: rotate(90deg); }
+.advanced .row-label { min-width: 6.5em; }
+.advanced .others-value { width: auto; min-width: 40px; white-space: nowrap; }

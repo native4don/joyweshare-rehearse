@@ -1,14 +1,19 @@
 import { lang, words } from "./i18n";
+import type { Voice } from "./player/part";
 
 export interface Choir {
   id: string;
   name: string;
   public: boolean;
+  /** The test list (#73): admins only, songs move from it to a choir. */
+  staging: boolean;
 }
 
 export interface Me {
   email: string | null;
   linked: string[];
+  /** An agent's read-only login link session (#79). */
+  agent: boolean;
   admin: boolean;
   choirs: Choir[];
   /** Choirs this browser is in only by link, which a Google sign-in would join. */
@@ -25,6 +30,12 @@ export interface Part {
   sung?: boolean;
   /** The AI voice that sings a sung part; REMY when not named. */
   voice?: string;
+  /**
+   * Where the part is drawn when it shares a staff (musescore-choir-plugins#420): the
+   * MusicXML part (0-based) and its notes' voice numbers there. Absent: a staff of its own.
+   */
+  staff?: number;
+  voices?: number[];
 }
 
 /** Who each AI voice is credited to, as its terms ask (REMY's and LYSE's tos.txt). */
@@ -33,11 +44,17 @@ export const VOICE_CREDITS: Record<string, string> = {
   LYSE: "UTAU French Resources (valshamr)",
 };
 
-/** The credit line shown while a song's sung parts play: the voice that sings them, with its makers. */
+/**
+ * The credit line shown while a song's sung parts play: every voice that sings them, in the
+ * parts' order, each with its makers. A mixed choir's parts name two (#102).
+ */
 export function sungCredit(parts: Part[]): string {
-  const voice = parts.find((p) => p.voice)?.voice ?? "REMY";
-  const by = VOICE_CREDITS[voice];
-  return `${words().sungBy} ${voice}${by ? `, ${by}` : ""}`;
+  const voices = new Set(parts.length ? parts.map((p) => p.voice ?? "REMY") : ["REMY"]);
+  const credited = [...voices].map((voice) => {
+    const by = VOICE_CREDITS[voice];
+    return `${voice}${by ? `, ${by}` : ""}`;
+  });
+  return `${words().sungBy} ${credited.join("; ")}`;
 }
 
 export interface SongSummary {
@@ -130,6 +147,8 @@ export interface Song extends SongSummary {
   choir: string;
   base: string;
   flags: SongFlag[];
+  /** The voice tree (#107), for carrying a singer's part between differently named parts. */
+  voices?: Voice[];
 }
 
 /** A refusal the page should show rather than an error: 401, 403 or 404. */
@@ -172,6 +191,8 @@ export async function postForm<T>(url: string, form: FormData): Promise<T> {
     body: form,
   });
   const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  // A 413 from the proxy in front of the Worker has no message of ours (#77).
+  if (response.status === 413 && !data.error) throw new Error(words().pdfTooBig);
   if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
   return data;
 }
@@ -188,8 +209,11 @@ export const remembered = {
     return value >= 0.5 && value <= 2 ? value : 1;
   },
   setZoom: (zoom: number) => localStorage.setItem("stemmanauhat:zoom", String(zoom)),
-  /** How the song lists are sorted on this device: by name or newest first. */
-  order: (): SongOrder => (localStorage.getItem("stemmanauhat:order") === "date" ? "date" : "name"),
+  /** How the song lists are sorted on this device: popular lately (the default, #89), by name or newest first. */
+  order: (): SongOrder => {
+    const value = localStorage.getItem("stemmanauhat:order");
+    return value === "name" || value === "date" ? value : "popular";
+  },
   setOrder: (order: SongOrder) => localStorage.setItem("stemmanauhat:order", order),
   /** The setlist picked for this choir's list, or null for every song. */
   setlist: (choir: string) => {
@@ -212,7 +236,7 @@ export function forgetSongLists() {
   }
 }
 
-export type SongOrder = "name" | "date";
+export type SongOrder = "popular" | "name" | "date";
 
 export type MixMode = "focus" | "equal" | "minus" | "solo";
 
@@ -221,6 +245,8 @@ export interface SongMemory {
   part?: string;
   /** The tempo this song was left at before tempo carried between songs (eerovil/stemmanauhat-cf#24). */
   rate?: number;
+  /** Säädöt › Lisäasetukset: each sung part's own volume by part name, 1 as it is (eerovil/stemmanauhat-cf#117). */
+  volumes?: Record<string, number>;
 }
 
 export function songMemory(choir: string, slug: string): SongMemory {
@@ -246,6 +272,10 @@ export interface CarriedSettings {
   rate?: number;
   /** "sung": play a song's sung parts when it has them; the piano otherwise (the default). */
   sound?: "piano" | "sung";
+  /** Säädöt › Lisäasetukset (#117): dB the sung parts sing louder an octave lower, 0–12. */
+  lowLouder?: number;
+  /** The key that sings as recorded: middle C (60), the song's mean or the moment's. */
+  middle?: 60 | "song" | "moment";
 }
 
 /** A tempo the player accepts: 0.5–1.5 of the written one. */

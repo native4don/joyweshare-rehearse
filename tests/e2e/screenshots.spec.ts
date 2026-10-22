@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { choosePartIfAsked, PASSPHRASE, signInAs } from "./helpers";
+import { choosePartIfAsked, mixedVoices, PASSPHRASE, signInAs } from "./helpers";
 
 // Evidence screenshots for a pull request. Skipped unless SCREENSHOTS_DIR is
 // set: ./scripts/run.sh env SCREENSHOTS_DIR=test-results/shots corepack pnpm exec playwright test screenshots
@@ -61,7 +61,25 @@ test("a split-part singer (Tenorib) starts on Tenori without being asked", async
   await page.screenshot({ path: `${dir}/split-part-fallback-phone.png` });
 });
 
-test("song list sorted newest first", async ({ page }) => {
+test("parts show by their place's own name: a song naming them T1 and Bass 2 (#107)", async ({ page }) => {
+  await page.route("**/api/songs/public/esittely", async (route) => {
+    const data = await (await route.fetch()).json();
+    data.parts = [{ name: "T1" }, { name: "Bass 2" }];
+    await route.fulfill({ json: data });
+  });
+  await page.goto("/c/public/esittely");
+  await expect(page.getByRole("dialog", { name: "Valitse oma stemma" })).toBeVisible();
+  await page.waitForTimeout(800);
+  await page.screenshot({ path: `${dir}/part-names-picker-phone.png` });
+  await page.evaluate(() => localStorage.setItem("stemmanauhat:public:part", "Basso 2"));
+  await page.reload();
+  await expect(page.locator(".own-name")).toHaveText("Basso 2");
+  await page.getByRole("button", { name: "Selvä" }).click();
+  await page.waitForTimeout(800);
+  await page.screenshot({ path: `${dir}/part-names-dock-phone.png` });
+});
+
+test("song list sorted popular lately and newest first", async ({ page }) => {
   await page.route("**/api/songs?choir=jm", async (route) => {
     const data = await (await route.fetch()).json();
     const song = data.songs[0];
@@ -72,11 +90,12 @@ test("song list sorted newest first", async ({ page }) => {
       // Rows with no credits and with credits too long for one line, to show they keep one height.
       ...(i % 3 === 1 ? { composer: null, lyricist: null, arranger: null } : {}),
       ...(i === 2 ? { composer: "Aino Esimerkki-Hyvinpitkänimi", arranger: "Sulo Sovittaja-Pitkänimi" } : {}) }));
+    data.popular = [["s5"], ["s2"], ["s4"]];
     await route.fulfill({ json: data });
   });
   await signInAs(page, "/c/jm", "laulaja@example.com");
-  await expect(page.locator(".songs .song-title").first()).toHaveText("Aamulaulu");
-  await page.screenshot({ path: `${dir}/song-list-by-name-phone.png` });
+  await expect(page.locator(".songs .song-title").first()).toHaveText("Suvivirsi");
+  await page.screenshot({ path: `${dir}/song-list-popular-phone.png` });
   await page.getByRole("group", { name: "Järjestys" }).getByRole("button", { name: "Uusimmat" }).click();
   await expect(page.locator(".songs .song-title").first()).toHaveText("Kotimaani");
   await page.screenshot({ path: `${dir}/song-list-newest-phone.png` });
@@ -279,4 +298,136 @@ test("own staff on a phone: a very long bar wraps over several lines (#45)", asy
   await expect(page.locator(".info-meta")).toContainText("Tahti 1 / 3");
   await page.waitForTimeout(800);
   await page.screenshot({ path: `${dir}/long-bar-own-staff-phone.png` });
+});
+
+test("the test list, as an admin sees it (#73)", async ({ page }) => {
+  await signInAs(page, "/c/testi", "yllapito@example.com");
+  await expect(page.getByLabel("Siirrä kuorolle: Uusi laulu")).toBeVisible();
+  await page.screenshot({ path: `${dir}/test-list-phone.png` });
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "Testilista" })).toBeVisible();
+  await page.screenshot({ path: `${dir}/home-admin-phone.png` });
+});
+
+test("requests (#77): the song named after the PDF, a PDF too big, and the list showing the name", async ({ page, browser }) => {
+  await signInAs(page, "/c/jm", "laulaja@example.com");
+  await page.goto("/c/jm?lang=en");
+  await page.getByRole("button", { name: "Request a practice track" }).click();
+  const file = page.getByLabel("Music (PDF, optional)");
+  await file.setInputFiles(
+    { name: "Ubi Caritas et Amor.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n%%EOF\n") });
+  await expect(page.getByLabel("Song name")).toHaveValue("Ubi Caritas et Amor");
+  await page.screenshot({ path: `${dir}/request-named-from-pdf-phone.png` });
+  await file.setInputFiles(
+    { name: "Iso nuotti.pdf", mimeType: "application/pdf", buffer: Buffer.alloc(20 * 1024 * 1024 + 1) });
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("The PDF is too large (over 20 MB).")).toBeVisible();
+  await page.screenshot({ path: `${dir}/request-pdf-too-big-phone.png` });
+  await file.setInputFiles(
+    { name: "Ubi Caritas et Amor.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n%%EOF\n") });
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.locator(".requested li")).toContainText("Ubi Caritas et Amor");
+  await page.locator(".requests").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${dir}/request-listed-by-pdf-name-phone.png`, fullPage: true });
+
+  const admin = await (await browser.newContext()).newPage();
+  await signInAs(admin, "/admin", "yllapito@example.com");
+  admin.once("dialog", (dialog) => dialog.accept());
+  const ubi = admin.locator('[data-choir="jm"] .request-list li', { hasText: "Ubi Caritas et Amor" });
+  await ubi.getByRole("button", { name: "Poista" }).click();
+  await expect(ubi).toHaveCount(0);
+});
+
+test("requests (#77): several PDFs at once", async ({ page }) => {
+  await signInAs(page, "/c/jm", "laulaja@example.com");
+  await page.goto("/c/jm?lang=en");
+  await page.getByRole("button", { name: "Request a practice track" }).click();
+  await page.getByLabel("Music (PDF, optional)").setInputFiles(["Ubi Caritas et Amor", "Kesäillan valssi", "Iltatähti"]
+    .map((name) => ({ name: `${name}.pdf`, mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n%%EOF\n") })));
+  await page.getByLabel("Notes").fill("For the Christmas concert");
+  await page.screenshot({ path: `${dir}/request-several-pdfs-phone.png` });
+});
+
+test("usage: the admin's card of who found the singing and which settings they use", async ({ page, browser }) => {
+  // Made-up visitors on the open list: a dozen people, fewer at each step towards the singing.
+  await page.goto("/c/public");
+  await page.evaluate(async () => {
+    const send = (body: object) => fetch("/api/events", { method: "POST", body: JSON.stringify(body) });
+    const base = { choir: "public", song: "laulettu", part: "Tenori", sung: 1 };
+    const settings = (over: object) => ({ mode: "focus", others: "0.4", rate: "1", staves: "all", zoom: "1", sound: "piano", ...over });
+    for (let i = 0; i < 12; i++) {
+      const visitor = crypto.randomUUID();
+      await send({ ...base, visitor, name: "song_open" });
+      if (i < 7) await send({ ...base, visitor, name: "settings_open" });
+      if (i < 3) await send({ ...base, visitor, name: "setting", setting: "rate", value: "0.85" });
+      if (i < 4) await send({ ...base, visitor, name: "sound_choice", value: "sung" });
+      if (i < 4) await send({ ...base, visitor, name: "setting", setting: "sound", value: "sung" });
+      if (i < 3) await send({ ...base, visitor, name: "listen", value: "sung", seconds: i ? 45 : 130, listen: crypto.randomUUID(), settings: settings({ sound: "sung", rate: i < 2 ? "0.85" : "1" }) });
+      await send({ ...base, visitor, name: "listen", value: "piano", seconds: 60 + i * 20, listen: crypto.randomUUID(), settings: settings({ staves: i % 3 ? "all" : "own" }) });
+    }
+  });
+  const admin = await (await browser.newContext({ viewport: { width: 1000, height: 1100 } })).newPage();
+  await signInAs(admin, "/admin", "yllapito@example.com");
+  const card = admin.locator(".card.usage");
+  await expect(card.locator('[data-usage="public"]')).toBeVisible();
+  await card.getByText("Asetukset (30 pv)").click();
+  await card.getByText("Viimeisimmät kuuntelut").click();
+  await card.screenshot({ path: `${dir}/usage-admin.png` });
+});
+
+test("player on a phone: the dot that says a song can be heard sung (#84)", async ({ page }) => {
+  await page.goto("/c/public/laulettu");
+  await choosePartIfAsked(page, "Tenori");
+  await page.getByRole("button", { name: "Selvä" }).click();
+  await expect(page.getByTestId("sung-dot")).toBeVisible();
+  await page.screenshot({ path: `${dir}/player-sung-dot-phone.png` });
+  await page.getByRole("button", { name: "Säädöt" }).click();
+  await expect(page.locator(".sung-tip")).toBeVisible();
+  await page.screenshot({ path: `${dir}/player-sung-dot-settings-phone.png` });
+});
+
+test("player on a phone: a mixed choir's song credits both singing voices (#102)", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stemmanauhat:settings", JSON.stringify({ sound: "sung" })));
+  await page.route("**/api/songs/public/laulettu", mixedVoices);
+  await page.goto("/c/public/laulettu");
+  await choosePartIfAsked(page, "Tenori");
+  await page.getByRole("button", { name: "Selvä" }).click();
+  await expect(page.locator(".dock .sung-credit")).toContainText("LYSE");
+  await page.screenshot({ path: `${dir}/player-two-voices-phone.png` });
+});
+
+test("song list: the notice to install the site as an app, on Android and on an iPhone (#91)", async ({ page, browser }) => {
+  await signInAs(page, "/c/jm", "laulaja@example.com");
+  await expect(page.getByRole("searchbox")).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(Object.assign(new Event("beforeinstallprompt"),
+    { prompt: async () => {}, userChoice: Promise.resolve({ outcome: "dismissed" }) })));
+  await expect(page.locator(".install")).toBeVisible();
+  await page.screenshot({ path: `${dir}/song-list-install-android.png` });
+
+  const iphone = await browser.newContext({ locale: "fi-FI", viewport: { width: 390, height: 844 }, deviceScaleFactor: 3,
+    isMobile: true, hasTouch: true, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+      + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1" });
+  const phone = await iphone.newPage();
+  await phone.goto("/c/public");
+  await expect(phone.locator(".install")).toBeVisible();
+  await phone.screenshot({ path: `${dir}/song-list-install-iphone.png` });
+  await iphone.close();
+});
+
+test("Säädöt's Lisäasetukset open on a sung song (#117)", async ({ page }) => {
+  await page.goto("/c/public/laulettu");
+  await page.evaluate(() => localStorage.setItem("stemmanauhat:settings", JSON.stringify({ sound: "sung" })));
+  await page.reload();
+  await choosePartIfAsked(page, "Tenori");
+  await expect(page.locator(".dock")).toHaveAttribute("data-player", "sung");
+  const selva = page.getByRole("button", { name: "Selvä" });
+  if (await selva.count()) await selva.click();
+  await page.getByRole("button", { name: "Säädöt" }).click();
+  await page.screenshot({ path: `${dir}/advanced-closed-phone.png` });
+  await page.locator("details.advanced summary").click();
+  await page.getByRole("slider", { name: /Basso.*voimakkuus/ }).fill("1.3");
+  await page.locator("details.advanced").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${dir}/advanced-open-phone.png` });
+  await page.locator(".sheet").evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await page.screenshot({ path: `${dir}/advanced-open-bottom-phone.png` });
 });

@@ -26,7 +26,7 @@ describe("the phrase table", () => {
     const fi = MESSAGES.fi;
     expect(fi.siteName).toBe("Stemmanauhat");
     expect(fi.searchSongs).toBe("Hae kappaletta");
-    expect([fi.byName, fi.newest]).toEqual(["Nimi", "Uusimmat"]);
+    expect([fi.popular, fi.byName, fi.newest]).toEqual(["Suositut", "Nimi", "Uusimmat"]);
     expect(fi.noSongs).toBe("Ei vielä kappaleita.");
     expect(fi.requestTrack).toBe("Pyydä stemmanauhaa");
     expect(fi.signOut).toBe("Kirjaudu ulos");
@@ -36,14 +36,15 @@ describe("the phrase table", () => {
     expect(fi.settings).toBe("Säädöt");
     expect(fi.chooseYourPart).toBe("Valitse oma stemma");
     expect(fi.added(3)).toBe("Lisätty 3.");
+    expect(fi.otherParts).toBe("Muut stemmat");
+    expect(fi.otherPartsVolume).toBe("Muiden stemmojen voimakkuus");
+    expect(fi.loadingPiano).toBe("Ladataan pianoa…");
+    expect(fi.loadingParts).toBe("Ladataan stemmoja…");
   });
 
-  it("attributes accurately, in either language", () => {
-    expect(MESSAGES.en.homeOpenHint).toBe("Rehearse your part on your own, anytime.");
-    expect(MESSAGES.fi.homeOpenHint).toBe("Harjoittele omaa stemmaasi omin päin, milloin vain.");
-    for (const lang of ["fi", "en"] as const) {
-      expect(JSON.stringify(MESSAGES[lang])).not.toMatch(/copyright|tekijänoikeus/i);
-    }
+  it("keeps the home page's line, with its English translation", () => {
+    expect(MESSAGES.fi.homeOpenHint).toBe("Tekijänoikeusvapaita kuorolauluja kaikille. Valitse laulu ja harjoittele omaa stemmaasi.");
+    expect(MESSAGES.en.homeOpenHint).toBe("Choir songs free of copyright, for everyone. Choose a song and practice your part.");
   });
 });
 

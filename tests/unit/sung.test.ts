@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SUNG_GAIN, SungPlayer } from "../../src/client/player/sung";
+import { SUNG_GAIN, SungPlayer, loadNotes } from "../../src/client/player/sung";
+import { smf } from "./smf";
 import type { FromWorklet, ToWorklet } from "../../src/client/player/sung-worklet";
 
 /** A stand-in for Web Audio: a clock the test moves, and a worklet node that records what it is told. */
@@ -137,11 +138,11 @@ describe("SungPlayer", () => {
     expect(port.sent.filter((m) => m.type === "seek")).toHaveLength(4);
   });
 
-  it("mixes with the piano's rule, scaled so the parts never add up to more than 1, in the worklet", async () => {
+  it("mixes with the piano's rule, scaled so the parts' power never adds up to more than 1, in the worklet", async () => {
     const { p, port } = await player();
     const gains = () => (port.sent.filter((m) => m.type === "gains").at(-1) as { gains: number[] }).gains;
     expect(p.levels().map((g) => Number(g.toFixed(3)))).toEqual([1, 0.16]);
-    const total = () => p.effectiveLevels().reduce((a, b) => a + b, 0);
+    const total = () => p.effectiveLevels().reduce((a, b) => a + b * b, 0);
     expect(total()).toBeCloseTo(1);
     expect(p.effectiveLevels()[0]! / p.effectiveLevels()[1]!).toBeCloseTo(1 / 0.16);
     expect(gains()).toEqual(p.effectiveLevels());
@@ -149,11 +150,53 @@ describe("SungPlayer", () => {
     expect(p.levels().map((g) => Number(g.toFixed(3)))).toEqual([0.16, 1]);
     p.setOthers(1);
     expect(p.levels()[0]).toBeCloseTo(p.levels()[1]!);
-    expect(total()).toBeCloseTo(1);
+    expect(total()).toBeLessThanOrEqual(1);
     p.setOwn(false);
     expect(p.effectiveLevels()[1]).toBe(0);
     expect(total()).toBeLessThanOrEqual(1);
     expect(gains()).toEqual(p.effectiveLevels());
+  });
+
+  it("keeps a song with many parts about as loud as one with few", async () => {
+    const context = new FakeContext();
+    vi.stubGlobal("AudioWorkletNode", FakeWorkletNode);
+    vi.stubGlobal("fetch", async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([6]).buffer }));
+    const urls = Array.from({ length: 8 }, (_, i) => `/x/parts/${i + 1}-P.mp3`);
+    const p = await SungPlayer.create(urls, () => {}, context as unknown as AudioContext);
+    const power = () => p.effectiveLevels().reduce((a, b) => a + b * b, 0);
+    expect(p.effectiveLevels()[0]).toBeGreaterThan(0.9);    // your own part: was 0.47 with eight parts
+    expect(power()).toBeCloseTo(1);
+    p.setOthers(1);                                          // all eight parts alike
+    const g = p.effectiveLevels();
+    expect(g.every((x) => Math.abs(x - g[0]!) < 1e-9)).toBe(true);
+    expect(g[0]!).toBeGreaterThan(2 / 8);                    // was 1/8 each
+    expect(power()).toBeLessThanOrEqual(1);
+  });
+
+  it("sends each part's gain by pitch to the worklet in frames, with the song's notes, and again on a new balance", async () => {
+    const { p, port } = await player();
+    const note = (part: number, key: number, start: number) => ({ part, track: part, on: 0, off: 1, key, start, end: start + 1 });
+    p.setUnisons({ parts: [[note(0, 60, 0)], [note(1, 48, 0), note(1, 60, 2)]], unisons: [] });
+    const curves = () => (port.sent.filter((m) => m.type === "curves").at(-1) as { curves: number[][] }).curves;
+    // Off by default: no curves at all.
+    expect(curves()).toEqual([]);
+    // At 5 dB with the moment's middle: C3 and C4 together meet at F#3, ±2.5 dB; C4 alone stays.
+    p.setBalance(5, "moment");
+    expect(curves()[0]![1]).toBeCloseTo(10 ** (-2.5 / 20));
+    expect(curves()[1]!.filter((_, i) => i % 2 === 0)).toEqual([0, 1950, 1962]);
+    expect(curves()[1]![1]).toBeCloseTo(10 ** (2.5 / 20));
+    p.setBalance(3, 60);
+    expect(curves()[0]).toEqual([0, 1]);
+    expect(curves()[1]![1]).toBeCloseTo(10 ** (3 / 20));
+  });
+
+  it("turns each part by its own volume after the mix, leaving the others as they were", async () => {
+    const { p, port } = await player();
+    const before = p.effectiveLevels();
+    p.setVolumes([1, 1.5]);
+    expect(p.effectiveLevels()[0]).toBeCloseTo(before[0]!);
+    expect(p.effectiveLevels()[1]).toBeCloseTo(before[1]! * 1.5);
+    expect((port.sent.filter((m) => m.type === "gains").at(-1) as { gains: number[] }).gains).toEqual(p.effectiveLevels());
   });
 
   it("lifts the mix by SUNG_GAIN into the limiter, which holds the peaks under the ceiling", async () => {
@@ -195,5 +238,27 @@ describe("SungPlayer", () => {
     vi.stubGlobal("fetch", async () => ({ ok: false, status: 404 }));
     await expect(SungPlayer.create(["/x/parts/1-T.mp3"], () => {}, new FakeContext() as unknown as AudioContext))
       .rejects.toThrow("HTTP 404");
+  });
+});
+
+describe("loadNotes", () => {
+  // T and B start E3 together, T on "kis" and B on "dum".
+  const midi = smf([["T", [[0, 52, 0, 480]]], ["B", [[1, 52, 0, 480]]]]);
+  const serve = (words: unknown) => vi.stubGlobal("fetch", async (url: string) => (url.endsWith(".mid")
+    ? { ok: true, arrayBuffer: async () => midi }
+    : words === undefined ? { ok: false, status: 404 } : { ok: true, json: async () => words }));
+  const kis = { parts: [[[0, 52, "kis"]], [[0, 52, "dum"]]] };
+
+  it("keeps a shared note sung by both parts where words.json gives them different syllables (eeron-omat-taskit#110)", async () => {
+    serve(kis);
+    expect((await loadNotes("/x/score.mid", ["T", "B"], "/x/words.json"))!.unisons).toEqual([]);
+  });
+
+  it("merges it as before for a song with no words.json, or one that does not fit its parts", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const words of [undefined, { parts: kis.parts.slice(1) }, { parts: [[["kis"]], []] }]) {
+      serve(words);
+      expect((await loadNotes("/x/score.mid", ["T", "B"], "/x/words.json"))!.unisons).toHaveLength(1);
+    }
   });
 });

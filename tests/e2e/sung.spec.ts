@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { choosePartIfAsked, gains, PASSPHRASE, playAndSeeCursorMove, shownScore } from "./helpers";
+import { choosePartIfAsked, gains, mixedVoices, PASSPHRASE, playAndSeeCursorMove, shownScore } from "./helpers";
 
 // A song whose parts are sung MP3s plays them on one Web Audio clock (player/sung.ts) when the
 // singer picks "Laulu" in Säädöt; the piano is the default (Eero, 2026-10-13). The seed uploads
@@ -36,6 +36,16 @@ test("the piano is the default; Säädöt's Laulu plays the sung parts, and the 
   // The next visit starts sung.
   await page.reload();
   await expect(gains(page)).toHaveAttribute("data-player", "sung");
+});
+
+test("a song whose parts name two voices credits both while the singing plays", async ({ page }) => {
+  await page.addInitScript(SUNG);
+  await page.route("**/api/songs/public/laulettu", mixedVoices);
+  await page.goto("/c/public/laulettu");
+  await choosePartIfAsked(page, "Tenori");
+  await expect(gains(page)).toHaveAttribute("data-player", "sung");
+  await expect(page.locator(".dock .sung-credit")).toHaveText(
+    "Tekoälyn laulama · Ääni: LYSE, UTAU French Resources (valshamr); REMY, UTAU French Resources (Hisa!)");
 });
 
 test("a piano visit fetches neither the singing code nor the sung MP3s", async ({ page }) => {
@@ -136,8 +146,8 @@ test("a song with a sung MP3 per part plays those together, and the cursor follo
   await choosePartIfAsked(page, "Tenori");
   await expect(gains(page)).toHaveAttribute("data-player", "sung");
   await page.getByRole("button", { name: "Selvä" }).click();
-  // The same balance rule as the piano's; the parts' gains add up to at most 1.
-  await expect(gains(page)).toHaveAttribute("data-gains", "0.862 0.138");
+  // The same balance rule as the piano's; the parts' power (squared gains) adds up to at most 1.
+  await expect(gains(page)).toHaveAttribute("data-gains", "0.987 0.158");
   await playAndSeeCursorMove(page);
 
   // Seeking and the tempo keep the one clock: the time shown follows.
@@ -197,4 +207,129 @@ test("the song list marks the songs that can be heard sung, and only those", asy
   await page.goto(`/?user=jm&passphrase=${PASSPHRASE}`);
   await expect(row("Iltalaulu")).toBeVisible();
   await expect(row("Iltalaulu").locator(".sung-mark")).toHaveCount(0);
+});
+
+// Telling singers a song can be heard sung (#84): a dot on Säädöt, never a card over the score.
+// It stays until Laulu has been tried once (Eero, 2026-10-18).
+test("a dot on Säädöt and on Laulu stays on every song open until Laulu is tried", async ({ page }) => {
+  await page.goto("/c/public/laulettu");
+  await choosePartIfAsked(page, "Tenori");
+  const dot = page.getByTestId("sung-dot");
+  await page.getByRole("button", { name: "Selvä" }).click();
+  for (let open = 1; open <= 4; open++) {
+    if (open > 1) await page.reload();
+    await expect(gains(page)).toHaveAttribute("data-player", "midi");
+    await expect(dot).toBeVisible();
+    await page.getByRole("button", { name: "Säädöt" }).click();
+    await expect(page.locator(".setting.lit")).toContainText("Ääni");
+    await expect(page.getByRole("group", { name: "Ääni" }).getByTestId("sung-dot-choice")).toBeVisible();
+    await expect(page.locator(".sung-tip")).toHaveText("Tämän kappaleen voi kuulla myös laulettuna: valitse Laulu.");
+    // Nothing plays by itself: the piano stays until Laulu is chosen.
+    await expect(gains(page)).toHaveAttribute("data-player", "midi");
+    await page.getByRole("button", { name: "Sulje säädöt" }).click();
+    await expect(dot).toBeVisible();
+  }
+  await page.getByRole("button", { name: "Säädöt" }).click();
+  const sound = page.getByRole("group", { name: "Ääni" });
+  await sound.getByRole("button", { name: "Laulu" }).click();
+  await expect(gains(page)).toHaveAttribute("data-player", "sung");
+  await expect(page.locator(".setting.lit")).toHaveCount(0);
+  await expect(sound.getByTestId("sung-dot-choice")).toHaveCount(0);
+  // Back on the piano, the dot does not come back: Laulu has been tried.
+  await sound.getByRole("button", { name: "Piano" }).click();
+  await expect(gains(page)).toHaveAttribute("data-player", "midi");
+  await page.getByRole("button", { name: "Sulje säädöt" }).click();
+  await page.reload();
+  await expect(gains(page)).toHaveAttribute("data-player", "midi");
+  await expect(shownScore(page)).toBeVisible();
+  await expect(dot).toHaveCount(0);
+});
+
+test("the singing dot never shows on a song without singing, nor to a singer who already sings", async ({ page }) => {
+  await page.goto("/c/public/esittely");
+  await choosePartIfAsked(page, "Tenori");
+  await expect(gains(page)).toHaveAttribute("data-player", "midi");
+  await expect(page.getByTestId("sung-dot")).toHaveCount(0);
+  await page.evaluate(() => localStorage.setItem("stemmanauhat:settings", JSON.stringify({ sound: "sung" })));
+  await page.goto("/c/public/laulettu");
+  await choosePartIfAsked(page, "Tenori");
+  await expect(gains(page)).toHaveAttribute("data-player", "sung");
+  await expect(page.getByTestId("sung-dot")).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("stemmanauhat:sung-tried"))).toBe("1");
+});
+
+test("Säädöt's closed Lisäasetukset set the singing's balance by pitch and each part's volume, and keep them", async ({ page }) => {
+  await page.goto("/c/public/laulettu");
+  await page.evaluate(SUNG);
+  await page.reload();
+  await choosePartIfAsked(page, "Tenori");
+  await expect(gains(page)).toHaveAttribute("data-player", "sung");
+  const selva = page.getByRole("button", { name: "Selvä" });
+  if (await selva.count()) await selva.click();
+  await page.getByRole("button", { name: "Säädöt" }).click();
+  const advanced = page.locator("details.advanced");
+  await expect(advanced).not.toHaveAttribute("open");
+  await expect(page.getByRole("slider", { name: "Matalat kovempaa" })).toBeHidden();
+  await advanced.locator("summary").click();
+  const low = page.getByRole("slider", { name: "Matalat kovempaa" });
+  await expect(low).toHaveValue("0");
+  const middle = page.getByRole("group", { name: "Keskikohta" });
+  await expect(middle.getByRole("button", { name: "Hetken" })).toHaveAttribute("aria-pressed", "true");
+  await low.fill("8");
+  await middle.getByRole("button", { name: "C4" }).click();
+  // The bass turned up: its gain in the worklet grows, the tenor's stays.
+  const before = (await gains(page).getAttribute("data-gains"))!.split(" ").map(Number);
+  await page.getByRole("slider", { name: /Basso.*voimakkuus/ }).fill("1.5");
+  await expect(advanced.locator(".others-value").last()).toHaveText("150 %");
+  const after = (await gains(page).getAttribute("data-gains"))!.split(" ").map(Number);
+  expect(after[0]).toBeCloseTo(before[0]!, 3);
+  expect(after[1]).toBeCloseTo(before[1]! * 1.5, 2);
+  // All of it is still there on the next visit.
+  await page.reload();
+  await expect(gains(page)).toHaveAttribute("data-player", "sung");
+  if (await selva.count()) await selva.click();
+  await page.getByRole("button", { name: "Säädöt" }).click();
+  await page.locator("details.advanced summary").click();
+  await expect(page.getByRole("slider", { name: "Matalat kovempaa" })).toHaveValue("8");
+  await expect(page.getByRole("group", { name: "Keskikohta" }).getByRole("button", { name: "C4" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("slider", { name: /Basso.*voimakkuus/ })).toHaveValue("1.5");
+});
+
+test("a song without singing has Muut stemmat alone in Lisäasetukset, closed until tapped", async ({ page }) => {
+  await page.goto("/c/public/esittely");
+  await choosePartIfAsked(page, "Tenori");
+  const selva = page.getByRole("button", { name: "Selvä" });
+  if (await selva.count()) await selva.click();
+  await page.getByRole("button", { name: "Säädöt" }).click();
+  const others = page.getByRole("slider", { name: "Muiden stemmojen voimakkuus" });
+  await expect(others).toBeHidden();
+  await page.locator("details.advanced summary").click();
+  await expect(others).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Matalat kovempaa" })).toHaveCount(0);
+  await expect(page.getByText("Nämä koskevat vain laulua.")).toHaveCount(0);
+});
+
+test("on a short phone Säädöt with Lisäasetukset open scrolls within the screen, top to bottom", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 560 });
+  await page.goto("/c/public/laulettu");
+  await page.evaluate(SUNG);
+  await page.reload();
+  await choosePartIfAsked(page, "Tenori");
+  await expect(gains(page)).toHaveAttribute("data-player", "sung");
+  const selva = page.getByRole("button", { name: "Selvä" });
+  if (await selva.count()) await selva.click();
+  await page.getByRole("button", { name: "Säädöt" }).click();
+  await page.locator("details.advanced summary").click();
+  const sheet = page.locator(".sheet");
+  const box = (await sheet.boundingBox())!;
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(await sheet.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  // The last part's slider scrolls into view and works; the first row is there again at the top.
+  const last = page.getByRole("slider", { name: /Basso.*voimakkuus/ });
+  await last.scrollIntoViewIfNeeded();
+  await expect(last).toBeInViewport();
+  await last.fill("0.5");
+  await expect(page.locator("details.advanced .others-value").last()).toHaveText("50 %");
+  await sheet.evaluate((el) => { el.scrollTop = 0; });
+  await expect(page.locator(".segmented.modes")).toBeInViewport();
 });

@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { PASSPHRASE } from "./helpers";
 
-// JoyWeShare: the site in English and Finnish. The other browser tests run with a
+// The site in English and Finnish. The other browser tests run with a
 // Finnish browser (playwright.config.ts); these run with an English one.
 test.use({ locale: "en-US" });
 
@@ -18,7 +18,7 @@ test("an English browser gets the song list in English, with US dates and Englis
   });
   await page.goto(`/?user=jm&passphrase=${PASSPHRASE}`);
   await expect(page).toHaveURL(/\/c\/jm$/);
-  await expect(page).toHaveTitle("JoyWeShare Rehearse");
+  await expect(page).toHaveTitle("Stemmanauhat");
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(page.getByRole("searchbox", { name: "Search for a song" })).toBeVisible();
   await expect(page.getByText("You came in with the choir's link.")).toBeVisible();
@@ -30,6 +30,20 @@ test("an English browser gets the song list in English, with US dates and Englis
   await order.getByRole("button", { name: "Newest" }).click();
   await expect(page.locator(".songs .date")).toHaveText(["10/5/2026", "9/1/2026", "8/1/2026"]);
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  // The site's maker and its source code (#119).
+  await expect(page.getByText("Made by Eero Vilpponen")).toBeVisible();
+  const source = page.getByRole("link", { name: "Source code" });
+  await expect(source).toHaveAttribute("href", "https://github.com/eerovil/stemmanauhat-cf");
+  await expect(source).toHaveAttribute("target", "_blank");
+});
+
+test("the signed-out front page and sign-in page name the maker and link the source code (#119)", async ({ page }) => {
+  await page.goto("/?lang=fi");
+  await expect(page.getByText("Tekijä: Eero Vilpponen")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Lähdekoodi" }))
+    .toHaveAttribute("href", "https://github.com/eerovil/stemmanauhat-cf");
+  await page.goto("/signin?lang=en");
+  await expect(page.getByRole("link", { name: "Source code" })).toBeVisible();
 });
 
 test("the language can be switched, is remembered on the device, and ?lang= overrides it", async ({ page }) => {
@@ -55,14 +69,30 @@ test("the player's part question and settings are in English", async ({ page }) 
   const dialog = page.getByRole("dialog", { name: "Choose your part" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("heading", { name: "Which part do you sing?" })).toBeVisible();
-  await dialog.getByRole("button", { name: "Tenori", exact: true }).click();
-  await expect(page).toHaveTitle("Kokeilulaulu – JoyWeShare Rehearse");
+  // The song's "Tenori" shows by its place's English name in the voice tree (#107).
+  await dialog.getByRole("button", { name: "Tenor", exact: true }).click();
+  await expect(page).toHaveTitle("Kokeilulaulu – Stemmanauhat");
   await page.getByRole("button", { name: "Got it" }).click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const listen = page.getByRole("group", { name: "How you listen" });
+  // On a narrow phone every mode's label has room on both sides, not just barely fitting (#69).
+  await page.setViewportSize({ width: 350, height: 780 });
+  for (const button of await listen.getByRole("button").all()) {
+    const room = await button.evaluate((b) => {
+      const text = document.createRange();
+      text.selectNodeContents(b);
+      return b.clientWidth - text.getBoundingClientRect().width;
+    });
+    expect(room).toBeGreaterThanOrEqual(12);
+  }
   await expect(listen.getByRole("button", { name: "Mine up front" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("Your part loud, the others softer")).toBeVisible();
   await expect(page.getByRole("button", { name: "Close settings" })).toBeVisible();
+  await page.getByText("Advanced", { exact: true }).click();
+  await expect(page.getByText("Other parts", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Volume of the other parts" })).toBeVisible();
+  // The player has no language switch: the language is picked on the other pages.
+  await expect(page.getByRole("group", { name: "Language" })).toHaveCount(0);
 });
 
 test("the server answers in the page's language", async ({ page }) => {

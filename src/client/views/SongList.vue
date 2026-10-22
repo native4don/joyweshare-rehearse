@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { getJson, hasSungParts, listCredits, postForm, postJson, Refused, remembered, type Me, type Setlist, type SongOrder, type SongRequest,
   songListKey, type SongSummary } from "../api";
 import Icon from "../components/Icon.vue";
 import LanguageSwitch from "../components/LanguageSwitch.vue";
+import SiteCredit from "../components/SiteCredit.vue";
 import { byTitle, day, t, words } from "../i18n";
+import { firstThisVisit, installed, installPrompt, ios, markDone, noticeAllowed, standalone } from "../install";
+import { track } from "../track";
+import { PDF_MAX_BYTES, pdfTitle } from "../../worker/requests";
 import RefusedView from "./Refused.vue";
 
 const props = defineProps<{ choir: string }>();
@@ -19,6 +23,8 @@ function sortBy(value: SongOrder) {
   remembered.setOrder(value);
 }
 
+/** The songs listened to lately, most popular first, tied songs in one group; the rest are not in it. */
+const popular = ref<string[][]>([]);
 const setlists = ref<Setlist[]>([]);
 const picked = ref<number | null>(remembered.setlist(props.choir));
 function pick(id: number | null) {
@@ -29,7 +35,7 @@ function pick(id: number | null) {
 const setlist = computed(() => setlists.value.find((l) => l.id === picked.value) ?? null);
 
 type ListData = { choir: { name: string }; songs: SongSummary[]; setlists: Setlist[]; requests: SongRequest[];
-  openFlags: number };
+  openFlags: number; popular?: string[][] };
 // The page shows nothing until it has both answers, then all of it at once. Coming
 // back from a song, the last answers (kept for this tab) show at once and are then
 // refreshed, so the list does not pop in piece by piece or lose its scroll (#43).
@@ -42,6 +48,8 @@ function show(data: ListData) {
   setlists.value = data.setlists;
   requests.value = data.requests;
   openFlags.value = data.openFlags;
+  // A list kept from before the groups (#89) had plain slugs.
+  popular.value = (data.popular ?? []).map((group) => (Array.isArray(group) ? group : [group]));
 }
 async function load() {
   const data = await getJson<ListData>(listUrl);
@@ -89,9 +97,13 @@ const shown = computed((): (SongSummary & { place?: number })[] => {
       .map((s, i) => ({ ...s, place: i + 1 }))
       .filter(matches);
   }
+  // Tied songs, and those with no listens lately (after the popular ones), go by name.
+  const rank = new Map(popular.value.flatMap((group, i) => group.map((slug) => [slug, i] as const)));
+  const rankOf = (s: SongSummary) => rank.get(s.slug) ?? popular.value.length;
   return [...songs.value]
     .filter(matches)
-    .sort((a, b) => (order.value === "date" ? b.published_at.localeCompare(a.published_at) : 0)
+    .sort((a, b) => (order.value === "date" ? b.published_at.localeCompare(a.published_at)
+      : order.value === "popular" ? rankOf(a) - rankOf(b) : 0)
       || byTitle(a, b));
 });
 /** With a setlist picked, a search also finds the songs outside it, so a remembered
@@ -163,45 +175,164 @@ async function removeSetlist() {
 const requests = ref<SongRequest[]>([]);
 /** Open flags on this choir's songs (#41): only counted here, for the admin's link. */
 const openFlags = ref(0);
-const canRequest = computed(() => me.value?.choirs.some((c) => c.id === props.choir && !c.public) ?? false);
+const canRequest = computed(() => me.value?.choirs.some((c) => c.id === props.choir && !c.public && !c.staging) ?? false);
 const requesting = ref<{ title: string; credits: string; note: string; name: string } | null>(null);
-const requestPdf = ref<File | null>(null);
+// Up to ten PDFs at once (#77), each sent as its own request named after its
+// file; with two or more, the name and composer fields go and the note is
+// copied to each.
+const PDFS_MAX = 10;
+const requestPdfs = ref<File[]>([]);
+const pdfInput = ref<HTMLInputElement | null>(null);
+const pdfErrors = ref(new Map<File, string>());
+const several = computed(() => requestPdfs.value.length > 1);
 const requestMessage = ref("");
 const sending = ref(false);
 function startRequest() {
   requestMessage.value = "";
-  requestPdf.value = null;
+  requestPdfs.value = [];
+  pdfErrors.value = new Map();
   requesting.value = { title: "", credits: "", note: "", name: "" };
 }
+function setPdfs(files: File[]) {
+  const before = requestPdfs.value;
+  requestPdfs.value = files;
+  pdfErrors.value = new Map();
+  if (!files.length && pdfInput.value) pdfInput.value.value = "";
+  // An empty song name takes the file's name, which can still be edited;
+  // so does one the previous file gave, but never one typed in. Coming down
+  // from several files, the name field was hidden, so whatever it held then
+  // belongs to no file left: the remaining file names it.
+  const r = requesting.value;
+  if (files.length !== 1 || !r) return;
+  const given = before.length === 1 ? pdfTitle(before[0]!.name) ?? "" : "";
+  if (before.length > 1 || !r.title.trim() || r.title === given) r.title = pdfTitle(files[0]!.name) ?? "";
+}
 function pickPdf(event: Event) {
-  requestPdf.value = (event.target as HTMLInputElement).files?.[0] ?? null;
+  const input = event.target as HTMLInputElement;
+  const files = [...(input.files ?? [])];
+  requestMessage.value = "";
+  if (files.length > PDFS_MAX) {
+    input.value = "";
+    setPdfs([]);
+    requestMessage.value = words().tooManyPdfs;
+    return;
+  }
+  setPdfs(files);
+}
+function removePdf(file: File) {
+  setPdfs(requestPdfs.value.filter((f) => f !== file));
+}
+/** One request; the error to show for it, or null once it is sent. */
+async function sendOne(fields: Record<string, string>, pdf: File | undefined): Promise<string | null> {
+  // Said here rather than after uploading it all from a phone.
+  if (pdf && pdf.size > PDF_MAX_BYTES) return words().pdfTooBig;
+  const form = new FormData();
+  form.set("choir", props.choir);
+  for (const [key, value] of Object.entries(fields)) form.set(key, value);
+  if (pdf) form.set("pdf", pdf);
+  try {
+    await postForm("/api/requests", form);
+    return null;
+  } catch (error) {
+    return (error as Error).message;
+  }
 }
 async function sendRequest() {
   const r = requesting.value!;
-  if (!r.title.trim() && !requestPdf.value) {
+  const pdfs = requestPdfs.value;
+  if (!r.title.trim() && !pdfs.length) {
     requestMessage.value = words().needTitleOrPdf;
     return;
   }
-  const form = new FormData();
-  form.set("choir", props.choir);
-  for (const [key, value] of Object.entries(r)) form.set(key, value);
-  if (requestPdf.value) form.set("pdf", requestPdf.value);
   sending.value = true;
   try {
-    await postForm("/api/requests", form);
-    requesting.value = null;
-    requestMessage.value = words().requestSent;
+    if (!several.value) {
+      const error = await sendOne(r, pdfs[0]);
+      if (error) {
+        requestMessage.value = error;
+        return;
+      }
+      requesting.value = null;
+      requestMessage.value = words().requestSent;
+    } else {
+      // One upload each, one after another, so each stays under the size limits.
+      // The same note for every song, whatever happens to the form meanwhile.
+      const fields = { note: r.note, name: r.name };
+      const failed = new Map<File, string>();
+      for (const pdf of pdfs) {
+        const error = await sendOne(fields, pdf);
+        if (error) failed.set(pdf, error);
+      }
+      if (failed.size) {
+        setPdfs([...failed.keys()]);
+        pdfErrors.value = failed;
+        requestMessage.value = words().sentSome(pdfs.length - failed.size, pdfs.length);
+      } else {
+        requesting.value = null;
+        requestMessage.value = words().requestsSent(pdfs.length);
+      }
+    }
     await load();
-  } catch (error) {
-    requestMessage.value = (error as Error).message;
   } finally {
     sending.value = false;
+  }
+}
+// The test list (#73): an admin moves a tried-out song to a choir's list.
+const staging = computed(() => me.value?.choirs.some((c) => c.id === props.choir && c.staging) ?? false);
+const moveTargets = computed(() => me.value?.choirs.filter((c) => !c.staging) ?? []);
+const moveMessage = ref("");
+async function moveSong(s: SongSummary, select: HTMLSelectElement) {
+  const target = moveTargets.value.find((c) => c.id === select.value);
+  select.value = "";
+  if (!target || !confirm(words().confirmMove(s.title, target.name))) return;
+  try {
+    await postJson("/api/admin/move", { choir: props.choir, slug: s.slug, to: target.id });
+    await load();
+    moveMessage.value = words().moved(s.title, target.name);
+  } catch (error) {
+    moveMessage.value = (error as Error).message;
   }
 }
 const last = computed(() => {
   const slug = remembered.last(props.choir);
   return songs.value.find((s) => s.slug === slug) ?? null;
 });
+// Installing as an app (#91): a quiet card on the song list, never in the player.
+// Not beside the card asking to add a Google account, and not on the test list.
+const inApp = standalone();
+const dismissed = ref(false);
+const installWay = computed((): "prompt" | "ios" | null => {
+  if (inApp || installed.value || dismissed.value || !ready.value || refused.value || staging.value
+    || me.value?.joinable.includes(props.choir)) return null;
+  return ios() ? "ios" : installPrompt.value ? "prompt" : null;
+});
+// Asked only once there is a way to install, so a browser with none uses up no showing.
+const installAllowed = ref<boolean | null>(null);
+const installNotice = computed(() => installWay.value && installAllowed.value ? installWay.value : null);
+watch(installWay, (way) => {
+  if (!way || installAllowed.value !== null) return;
+  installAllowed.value = noticeAllowed();
+  if (installAllowed.value && firstThisVisit(`stemmanauhat:install-shown:${props.choir}`)) track("install_shown", { choir: props.choir, value: way });
+}, { immediate: true });
+async function install() {
+  const prompt = installPrompt.value;
+  if (!prompt) return;
+  installPrompt.value = null; // A prompt can be shown only once.
+  await prompt.prompt();
+  const { outcome } = await prompt.userChoice;
+  if (outcome === "accepted") {
+    // Chrome also says appinstalled, which counts it again (install.ts): the
+    // admin page counts people, so one install is still one.
+    markDone();
+    installed.value = true;
+    track("install_accept", { choir: props.choir });
+  }
+}
+function dismissInstall() {
+  markDone();
+  dismissed.value = true;
+  track("install_dismiss", { choir: props.choir, value: installWay.value ?? undefined });
+}
 const joinUrl = computed(() => `/auth/login?next=${encodeURIComponent(`/c/${props.choir}`)}`);
 const songUrl = (slug: string) => `/c/${encodeURIComponent(props.choir)}/${encodeURIComponent(slug)}`;
 </script>
@@ -217,6 +348,13 @@ const songUrl = (slug: string) => `/c/${encodeURIComponent(props.choir)}/${encod
     <aside v-if="me?.joinable.includes(choir)" class="join card">
       <p>{{ t.joinText }}</p>
       <a class="button primary" :href="joinUrl">{{ t.joinButton }}</a>
+    </aside>
+    <aside v-if="installNotice" class="install card">
+      <p>{{ installNotice === "ios" ? t.installIosText : t.installText }}</p>
+      <div class="row">
+        <button v-if="installNotice === 'prompt'" type="button" class="primary" @click="install">{{ t.installButton }}</button>
+        <button type="button" :class="{ link: installNotice === 'prompt' }" @click="dismissInstall">{{ installNotice === "ios" ? t.gotIt : t.notNow }}</button>
+      </div>
     </aside>
     <a v-if="last" class="button primary continue" :href="songUrl(last.slug)">▶ {{ t.continueFrom }}: {{ last.title }}</a>
     <section v-if="editing" class="card setlist-edit">
@@ -246,19 +384,31 @@ const songUrl = (slug: string) => `/c/${encodeURIComponent(props.choir)}/${encod
     <section v-else-if="requesting" class="card request-form">
       <h2>{{ t.requestTrack }}</h2>
       <p class="hint">{{ t.requestHint }}</p>
-      <label>{{ t.songName }}<input v-model="requesting.title" type="text" maxlength="200" /></label>
-      <label>{{ t.composerArranger }}<input v-model="requesting.credits" type="text" maxlength="200" /></label>
-      <label>{{ t.notes }}<textarea v-model="requesting.note" rows="3" maxlength="1000"></textarea></label>
-      <label v-if="!me?.email">{{ t.yourName }}<input v-model="requesting.name" type="text" maxlength="100" /></label>
-      <label>{{ t.musicPdfOptional }}<input type="file" accept="application/pdf,.pdf" @change="pickPdf" /></label>
+      <template v-if="!several">
+        <label>{{ t.songName }}<input v-model="requesting.title" type="text" maxlength="200" :disabled="sending" /></label>
+        <label>{{ t.composerArranger }}<input v-model="requesting.credits" type="text" maxlength="200" :disabled="sending" /></label>
+      </template>
+      <label>{{ t.notes }}<textarea v-model="requesting.note" rows="3" maxlength="1000" :disabled="sending"></textarea></label>
+      <label v-if="!me?.email">{{ t.yourName }}<input v-model="requesting.name" type="text" maxlength="100" :disabled="sending" /></label>
+      <label>{{ t.musicPdfOptional }}<input ref="pdfInput" type="file" accept="application/pdf,.pdf" multiple :disabled="sending" @change="pickPdf" /></label>
+      <p class="hint">{{ t.pdfsHint }}</p>
+      <ul v-if="requestPdfs.length" class="pdf-list">
+        <li v-for="pdf in requestPdfs" :key="pdf.name + pdf.size + pdf.lastModified">
+          <span class="pdf-name">{{ pdfTitle(pdf.name) ?? pdf.name }}<span v-if="pdfErrors.get(pdf)" class="pdf-error error">{{ pdfErrors.get(pdf) }}</span></span>
+          <button type="button" class="link" :aria-label="t.removePdf(pdfTitle(pdf.name) ?? pdf.name)" :disabled="sending" @click="removePdf(pdf)">✕</button>
+        </li>
+      </ul>
       <p v-if="requestMessage" class="hint">{{ requestMessage }}</p>
       <div class="row">
         <button type="button" class="primary" :disabled="sending" @click="sendRequest">{{ t.send }}</button>
-        <button type="button" @click="requesting = null">{{ t.cancel }}</button>
+        <!-- Not while a batch is still going up: it would carry on unseen (#77). -->
+        <button type="button" :disabled="sending" @click="requesting = null">{{ t.cancel }}</button>
       </div>
     </section>
     <template v-else>
-      <div v-if="setlists.length || me?.admin" class="row setlists">
+      <p v-if="staging" class="hint staging-hint">{{ t.stagingHint }}</p>
+      <p v-if="moveMessage" class="hint move-message">{{ moveMessage }}</p>
+      <div v-if="!staging && (setlists.length || me?.admin)" class="row setlists">
         <select v-if="setlists.length" :value="setlist?.id ?? ''" :aria-label="t.setlist" :class="{ picked: setlist }"
           @change="pick(Number(($event.target as HTMLSelectElement).value) || null)">
           <option value="">{{ t.allSongs }}</option>
@@ -270,7 +420,8 @@ const songUrl = (slug: string) => `/c/${encodeURIComponent(props.choir)}/${encod
       </div>
       <p v-if="editMessage" class="hint">{{ editMessage }}</p>
       <input v-model="query" class="search" type="search" :placeholder="t.searchSongs" :aria-label="t.searchSongs" />
-      <div v-if="!setlist" class="segmented two order" role="group" :aria-label="t.order">
+      <div v-if="!setlist" class="segmented order" role="group" :aria-label="t.order">
+        <button type="button" :class="{ on: order === 'popular' }" :aria-pressed="order === 'popular'" @click="sortBy('popular')">{{ t.popular }}</button>
         <button type="button" :class="{ on: order === 'name' }" :aria-pressed="order === 'name'" @click="sortBy('name')">{{ t.byName }}</button>
         <button type="button" :class="{ on: order === 'date' }" :aria-pressed="order === 'date'" @click="sortBy('date')">{{ t.newest }}</button>
       </div>
@@ -281,6 +432,11 @@ const songUrl = (slug: string) => `/c/${encodeURIComponent(props.choir)}/${encod
             <span class="credits">{{ listCredits(s) }}</span></a>
           <span v-if="newest.has(s.slug)" class="badge">{{ t.newBadge }}</span>
           <span v-if="order === 'date' && !setlist" class="date">{{ day(s.published_at) }}</span>
+          <select v-if="staging" class="move" value="" :aria-label="t.moveSongTo(s.title)"
+            @change="moveSong(s, $event.target as HTMLSelectElement)">
+            <option value="" disabled>{{ t.moveTo }}</option>
+            <option v-for="c in moveTargets" :key="c.id" :value="c.id">{{ c.name }}</option>
+          </select>
         </li>
       </ul>
       <template v-if="others.length">
@@ -321,5 +477,6 @@ const songUrl = (slug: string) => `/c/${encodeURIComponent(props.choir)}/${encod
       </form>
       <LanguageSwitch />
     </footer>
+    <SiteCredit />
   </main>
 </template>

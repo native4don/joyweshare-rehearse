@@ -22,6 +22,9 @@ const TOLERANCE = 512;
 const COMPARE = 512;
 /** Frames over which the sound fades in after a start or a jump, so no click. */
 const FADE = 128;
+/** Frames over which a part fades out of and back into a unison it is left out of or sings louder (12 ms at 44.1 kHz). */
+const QUIET_FADE = 512;
+const NONE: number[] = [];
 
 const WINDOW = new Float32Array(GRAIN);
 for (let i = 0; i < GRAIN; i++) WINDOW[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / GRAIN);
@@ -32,6 +35,10 @@ export class PartStretcher {
   /** The frames of the longest part: where the song ends. */
   readonly length: number;
   private gains: number[];
+  /** Per part, where it is left out or turned up (unison.ts): song frames, [start, end, gain] in order. */
+  private spans: number[][];
+  /** Per part, its gain by pitch (balance.ts): song frames, [frame, gain, frame, gain, …] in order. */
+  private curves: number[][];
   /** Song frames at the last start, jump or tempo change, and output frames since: the position. */
   private base = 0;
   private emitted = 0;
@@ -52,10 +59,20 @@ export class PartStretcher {
   constructor(private readonly parts: Float32Array[]) {
     this.length = Math.max(0, ...parts.map((p) => p.length));
     this.gains = parts.map(() => 0);
+    this.spans = parts.map(() => []);
+    this.curves = parts.map(() => []);
   }
 
   setGains(gains: number[]): void {
     this.gains = this.parts.map((_, i) => gains[i] ?? 0);
+  }
+
+  setSpans(spans: number[][]): void {
+    this.spans = this.parts.map((_, i) => spans[i] ?? []);
+  }
+
+  setCurves(curves: number[][]): void {
+    this.curves = this.parts.map((_, i) => curves[i] ?? []);
   }
 
   /** The song position, in frames: where the sound going out now comes from. */
@@ -137,8 +154,43 @@ export class PartStretcher {
       if (gain === 0) continue;
       const part = this.parts[p]!;
       const end = Math.min(n, part.length - start);
-      for (let i = Math.max(0, -start); i < end; i++) out[at + i]! += part[start + i]! * gain;
+      const spans = this.spansIn(p, start, start + n);
+      const curve = this.curves[p]!;
+      if (!spans.length && !curve.length) {
+        for (let i = Math.max(0, -start); i < end; i++) out[at + i]! += part[start + i]! * gain;
+        continue;
+      }
+      let k = curveIndex(curve, start);
+      for (let i = Math.max(0, -start); i < end; i++) {
+        const f = start + i;
+        let g = 1;
+        if (curve.length) {
+          while (k + 2 < curve.length && curve[k + 2]! <= f) k += 2;
+          g = curveAt(curve, k, f);
+        }
+        for (let k = 0; k < spans.length; k += 3) {
+          const depth = Math.min(f - spans[k]!, spans[k + 1]! - f);
+          if (depth > 0) g *= 1 + (spans[k + 2]! - 1) * Math.min(1, depth / QUIET_FADE);
+        }
+        out[at + i]! += part[start + i]! * gain * g;
+      }
     }
+  }
+
+  /** The part's spans that reach into frames [from, to). */
+  private spansIn(p: number, from: number, to: number): number[] {
+    const s = this.spans[p]!;
+    let lo = 0;
+    let hi = s.length / 3;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (s[3 * mid + 1]! <= from) lo = mid + 1;
+      else hi = mid;
+    }
+    if (3 * lo >= s.length || s[3 * lo]! >= to) return NONE;
+    const found: number[] = [];
+    for (let k = 3 * lo; k < s.length && s[k]! < to; k += 3) found.push(s[k]!, s[k + 1]!, s[k + 2]!);
+    return found;
   }
 
   /**
@@ -196,4 +248,23 @@ export class PartStretcher {
     this.overlap.copyWithin(0, HOP);
     this.overlap.fill(0, HOP);
   }
+}
+
+/** The last breakpoint at or before frame `f` (the first when none is). */
+function curveIndex(curve: number[], f: number): number {
+  let lo = 0;
+  let hi = curve.length / 2 - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (curve[2 * mid]! <= f) lo = mid;
+    else hi = mid - 1;
+  }
+  return 2 * Math.max(0, lo);
+}
+
+/** The curve's gain at frame `f`, from breakpoint `k` on: straight between two, flat past the ends. */
+function curveAt(curve: number[], k: number, f: number): number {
+  if (f <= curve[k]! || k + 2 >= curve.length) return curve[k + 1]!;
+  const [a, ga, b, gb] = [curve[k]!, curve[k + 1]!, curve[k + 2]!, curve[k + 3]!];
+  return ga + ((gb - ga) * (f - a)) / (b - a);
 }

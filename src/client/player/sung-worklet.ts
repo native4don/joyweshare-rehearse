@@ -9,6 +9,8 @@ import { PartStretcher } from "./stretch";
 export type ToWorklet =
   | { type: "load"; parts: Float32Array[] }
   | { type: "gains"; gains: number[] }
+  | { type: "spans"; spans: number[][] }
+  | { type: "curves"; curves: number[][] }
   | { type: "play"; frames: number }
   | { type: "pause" }
   | { type: "seek"; frames: number }
@@ -44,6 +46,8 @@ class SungProcessor extends AudioWorkletProcessor {
     const s = this.stretcher;
     if (!s) return;
     if (m.type === "gains") s.setGains(m.gains);
+    else if (m.type === "spans") s.setSpans(m.spans);
+    else if (m.type === "curves") s.setCurves(m.curves);
     else if (m.type === "play") { s.start(m.frames); this.report(); }
     else if (m.type === "pause") s.pause();
     else if (m.type === "seek") { const wasPlaying = s.playing; s.start(m.frames); s.playing = wasPlaying; this.report(); }

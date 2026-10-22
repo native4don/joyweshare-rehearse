@@ -21,6 +21,21 @@ a copy of your own for your choirs, see [Run your own copy](#run-your-own-copy).
   passphrases at `/admin`.
 - **Songs:** song-app writes each version to R2 under `songs/<choir>/<slug>/<version>/` and points
   a D1 `songs` row at it. The format is in song-app's `docs/stemmanauhat-site.md`.
+  One song can be on several lists with one copy of its files (#104):
+  `./scripts/publish-songs.sh jm,public <bundle>` uploads them once, under the first list's folder,
+  and points each list's row at them. Publishing takes the song off any private list not named;
+  `public` and `testi` keep theirs. A private list whose row points at the same files as a named
+  list's keeps the song too, with the new version, so fixing a JOY-kuoro song keeps it on
+  JOY-alumnit. Every JOY-alumnit song is on JOY-kuoro's list too, but a new JOY-kuoro song is not
+  on the alumni's (eerovil/eeron-omat-taskit#101): publishing or moving a song to `joy-alumnit`
+  puts it on `joy` as well (`ALSO_ON`). song-app's own Publish panel does not do that yet: publish a song that is on several
+  lists with sing-song or `publish-songs.sh`. `scripts/merge-duplicate-songs.mjs` turned the earlier copies
+  into one.
+- **Test list:** `testi` ("Testilista", D1 `choirs.staging = 1`) is where a new song is tried out
+  before a choir gets it. Only admins open it: it has no members, link, requests or flags. song-app
+  publishes there like to any choir; on the list an admin picks "Siirrä…" and a choir, and the song
+  moves: its files are copied to the choir's folder, it replaces a song of the same name there, and
+  it leaves the test list.
 - **Setlists:** a choir's named song lists in their own order, such as a concert's program (D1
   `setlists`). Singers pick one from the song list's dropdown and see only its songs, numbered;
   admins make and change them on the same page ("Uusi setlista", "Muokkaa").
@@ -49,11 +64,59 @@ a copy of your own for your choirs, see [Run your own copy](#run-your-own-copy).
   A song published with a sung MP3 per part (AI-sung: REMY for men's parts, LYSE for women's) also offers "Ääni: Laulu"
   in Säädöt: all its parts then play from those files on one Web Audio clock, at any tempo
   without changing the pitch. The piano stays the default; the choice carries from song to song.
+  A note several parts start together is sung once (#76), but only where they sing it on the same
+  syllable: the bundle's `words.json` (sing-song, eeron-omat-taskit#110) lists each part's
+  [seconds, key, syllable] per note. A song without it merges every such note, as before.
 - **App:** the site installs to a phone's home screen ("Lisää aloitusnäytölle" / "Asenna sovellus"):
   `public/manifest.webmanifest` and the icons drawn from `public/icon.svg` by
   `scripts/make-pwa-icons.mjs`. `public/sw.js` only shows an offline page when there is no network;
   it caches the icons and that page, never a song, a page or the API, so access checks and new
   versions work as before.
+
+### Part names
+
+A singer's part carries from song to song: the player starts each song on the part they last
+picked in that choir. Songs name and divide their parts differently ("Basso 2", "Basso", "Bass",
+"B2"), so the `voices` table in D1 (#107) holds a tree of voices: group (Naiset, Miehet), voice
+(Basso), divided part (Basso 2) and its upper or lower half (Upper bass 2), at most four levels.
+Each place lists every name it goes by, compared ignoring letter case and spaces, and has
+its own name in Finnish and English (`name_fi`, `name_en`): the part picker and the player show
+that one, so "B2", "Bass 2" and "Basso 2" all read "Basso 2" ("Bass 2" in English). Renaming a
+place renames it in every song, with no republishing. A name not in the tree shows as the
+song has it. A remembered
+part that the song doesn't have falls back to the nearest place above it that it has, never
+down or sideways; a name not in the tree ("Tenori solo") matches only itself, and a name ending
+in "b" ("S1b") sits just below the name without it. Publishing with `scripts/publish-songs.sh`
+stops on a part name in no place and not listed in `unplaced_parts` (solos, trios), before
+anything goes up, and lists the places: the person publishing says where each one goes, and
+it goes in with the song (`--place "Bassi=B"` a name of an existing place, `--place "Basso
+4=B4@B"` a new place under one, `--place "Kertoja=-"` in no place). To change the tree by hand,
+edit the table, no code change needed:
+
+    ./scripts/run.sh --cloudflare corepack pnpm exec wrangler d1 execute stemmanauhat --remote \
+      --command "UPDATE voices SET names = json_insert(names, '\$[#]', 'Bassi') WHERE id = 'B'"
+
+A place made by `--place` shows as the name it was made for, in both languages, until renamed
+(`UPDATE voices SET name_en = 'Bass 4' WHERE id = 'B4'`).
+
+### Usage events
+
+To see whether singers find the singing and which settings they use
+(eerovil/eeron-omat-taskit#72), the player sends a few events to `/api/events`:
+opening a song, opening Säädöt, choosing Piano or Laulu, each settings change
+(sliders once, with the value they end on), and every listen of 3 seconds or
+more, with its length, the sound and the six settings it played with. A listen
+still playing is saved again each minute. They go to the `events` table in D1
+with the signed-in Google email, or for anyone without one only a random id
+the device keeps; no IP. Admins' own visits are kept, marked, and left out of the
+counts. The admin page shows the last 30 days and the latest 50 listens, and
+deletes events over a year old. Nothing is shown to singers about it.
+
+The song list's notice that the site can be installed as an app (#91) sends
+`install_shown`, `install_dismiss` and `install_accept`, and the installed app sends
+`app_open` once per visit (iPhones never say they installed); the admin page counts
+who saw the notice and who installed or used the app. The notice shows on at most
+three song list pages, and never again once dismissed or installed.
 
 ## Running it
 
@@ -128,7 +191,8 @@ the songs into your copy once step 9 is done.
    credentials → OAuth client ID, type *Web application*, with the authorized redirect URI
    `https://<WORKER_HOST>/auth/callback` (and `https://<PUBLIC_HOST>/auth/callback` if you set one).
 7. **`./scripts/set-worker-secrets.sh`.** It makes `SESSION_SECRET` and asks for the client id and
-   secret from step 6.
+   secret from step 6. Optional: `./scripts/agent-login.sh --setup` makes `AGENT_LOGIN_SECRET`,
+   so this host can make short read-only singer login links for agents (see AGENTS.md).
 8. **`./scripts/add-admin.sh <your Google email>`.** Sign in at `https://<WORKER_HOST>/admin`, add
    each choir's members or make its link there.
 9. **The choir app.** song-app's `.env` needs three values for your copy:
@@ -145,7 +209,8 @@ eerovil's copy runs in the ruokalista Cloudflare account. The D1 database `stemm
 R2 bucket `stemmanauhat` are there, the credentials are in `~/.local/share/stemmanauhat/cloudflare.env`
 on the host, and the GitHub Actions secrets are set. The VPS proxies `stemmanauhat.vilpponen.fi`
 to the Worker (`PUBLIC_HOST`), so the Google client needs both names'
-`/auth/callback`. Its choirs are `jm` and `naiskuoro`, and old-site links keep working with the
+`/auth/callback`. Its choirs are `jm`, `naiskuoro`, `joy` (JOY-kuoro) and `joy-alumnit` (JOY-alumnit,
+its former singers, with JOY's songs on the same files), `laurille` (Laurille) and `yl` (YL), and old-site links keep working with the
 passphrase set by `./scripts/set-passphrase.sh jm`; `/admin` cannot show that link, and "Tee uusi
 linkki" replaces it.
 

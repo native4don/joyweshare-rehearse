@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { decideAccess, type AccessFacts } from "../../src/worker/access";
 import { parseRange, safeSongPath } from "../../src/worker/files";
 import { readEmail } from "../../src/worker/google";
-import { parseEmails, parseSetlist, safeNext, versionOf } from "../../src/worker/index";
+import { parseEmails, parseSetlist, parseVoices, popularGroups, safeNext, versionOf } from "../../src/worker/index";
 import { joinUrl, linkKey } from "../../src/worker/links";
 import { publicOrigin } from "../../src/worker/origin";
 import { newPassphraseRecord, passphraseMatches } from "../../src/worker/passphrase";
@@ -10,7 +10,7 @@ import { readSession, sessionCookie } from "../../src/worker/session";
 import { base64UrlEncode } from "../../src/worker/signing";
 
 const facts = (over: Partial<AccessFacts> = {}): AccessFacts => ({
-  choirExists: true, choirPublic: false, linkGeneration: 3, isMember: false, isAdmin: false, ...over,
+  choirExists: true, choirPublic: false, choirStaging: false, linkGeneration: 3, isMember: false, isAdmin: false, ...over,
 });
 
 describe("decideAccess", () => {
@@ -33,6 +33,19 @@ describe("decideAccess", () => {
     expect(decideAccess(s, "jm", facts({ linkGeneration: 4 }))).toBe("refused");
     expect(decideAccess(s, "jm", facts({ linkGeneration: null }))).toBe("refused");
     expect(decideAccess(s, "naiskuoro", facts())).toBe("refused");
+  });
+  it("lets an agent's session into the choirs it names, never the test list", () => {
+    const s = { agent: ["jm"], exp: 0 };
+    expect(decideAccess(s, "jm", facts({ linkGeneration: null }))).toBe("ok");
+    expect(decideAccess(s, "naiskuoro", facts())).toBe("refused");
+    expect(decideAccess({ agent: ["testi"], exp: 0 }, "testi", facts({ choirStaging: true }))).toBe("refused");
+  });
+  it("lets only admins into the test list, not its members or its link", () => {
+    const admin = { email: "a@example.com", exp: 0 };
+    expect(decideAccess(admin, "testi", facts({ choirStaging: true, isAdmin: true }))).toBe("ok");
+    expect(decideAccess(admin, "testi", facts({ choirStaging: true, isMember: true }))).toBe("refused");
+    expect(decideAccess({ links: { testi: 3 }, exp: 0 }, "testi", facts({ choirStaging: true }))).toBe("refused");
+    expect(decideAccess(null, "testi", facts({ choirStaging: true }))).toBe("signin");
   });
 });
 
@@ -177,5 +190,27 @@ describe("parseSetlist", () => {
     expect(parseSetlist({ name: "A", songs: ["kokeilu", "kokeilu"] }, slugs)).toHaveProperty("error");
     expect(parseSetlist({ name: "A", songs: "kokeilu" }, slugs)).toHaveProperty("error");
     expect(parseSetlist({ name: "A", songs: [1] }, slugs)).toHaveProperty("error");
+  });
+});
+
+describe("popularGroups", () => {
+  it("keeps the order and puts songs tied on people and listening time in one group (#89)", () => {
+    expect(popularGroups([
+      { song: "a", people: 3, seconds: 200 }, { song: "b", people: 2, seconds: 90 },
+      { song: "c", people: 2, seconds: 90 }, { song: "d", people: 2, seconds: 60 },
+    ])).toEqual([["a"], ["b", "c"], ["d"]]);
+    expect(popularGroups([])).toEqual([]);
+  });
+});
+
+describe("parseVoices", () => {
+  it("reads the rows and leaves out one whose names are not a list of strings", () => {
+    expect(parseVoices([
+      { id: "men", parent: null, name_fi: "Miehet", name_en: "Men", names: '["Miehet", "Men"]' },
+      { id: "B", parent: "men", name_fi: "Basso", name_en: "Bass", names: "not json" },
+      { id: "T", parent: "men", name_fi: "Tenori", name_en: "Tenor", names: '["Tenori", 1]' },
+      { id: "Bar", parent: "men", name_fi: "Baritoni", name_en: "Baritone", names: '{"name": "Bar"}' },
+    ])).toEqual([{ id: "men", parent: null, fi: "Miehet", en: "Men", names: ["Miehet", "Men"] }]);
+    expect(parseVoices([])).toEqual([]);
   });
 });

@@ -1,16 +1,39 @@
+import "@fontsource/tinos/400.css";
+import "@fontsource/tinos/400-italic.css";
+import "@fontsource/tinos/700.css";
+import "@fontsource/tinos/700-italic.css";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
+import type { Focus } from "./part";
 import { barAnchors, joinBars, xOnAnchors, type Anchor } from "./bar";
 import { biggestStep, cappedTargets, needsWidening, nextFactors } from "./spacing";
 import { BarMap, splitLongBars } from "./split";
 
 /** OSMD lays out in units of 10 px at zoom 1. */
 const UNIT = 10;
+/**
+ * The score's text font: Tinos, drawn with Times New Roman's widths, shipped with
+ * the site. OSMD asks for Times New Roman, which Android does not have: it used
+ * Noto Serif, about 18 % wider, and OSMD widened every bar whose lyrics then sat
+ * a little tight, up to 2.5 times (#86). With the same font everywhere, a song is
+ * laid out alike on every device.
+ */
+const SCORE_FONT = "Tinos";
+
 /** About one notehead, in OSMD units. The cursor band is two of them, as in the videos. */
 const NOTEHEAD = 1.3;
+
+/** Loads the score font's four faces, with the Latin and Latin Extended letters songs use. */
+async function loadScoreFont(): Promise<void> {
+  const sample = "Aa\u00e4\u00f6\u00e5\u0161\u017e\u0151";
+  await Promise.all(["", "italic ", "bold ", "italic bold "].map((style) =>
+    document.fonts.load(`${style}16px ${SCORE_FONT}`, sample).catch(() => [])));
+}
 
 interface Sounding {
   /** Index of the part (MusicXML instrument) the note belongs to. */
   part: number;
+  /** Its voice there, as the MusicXML numbers it: two parts can share a staff. */
+  voice: number;
   start: number;
   end: number;
   el: SVGGElement;
@@ -34,6 +57,9 @@ interface Bar {
  * Outside this class a bar is the song's own (timing.json's); a long bar may be
  * drawn as several pieces (split.ts), which `pieces` translates to and from.
  */
+/** OSMD's page width in the one-line view: room for any song on one line. */
+const ONE_LINE_MAX_WIDTH = 10_000_000;
+
 export class Score {
   private readonly osmd: OpenSheetMusicDisplay;
   /** One per drawn piece. */
@@ -71,16 +97,22 @@ export class Score {
       drawLyricist: false,
       drawCredits: false,
       drawingParameters: "compacttight",
+      defaultFontFamily: SCORE_FONT,
       // One graphical bar per bar in the file, so timing.json's indexes line up.
       autoGenerateMultipleRestMeasuresFromRestMeasures: false,
     });
+    // The one-line view is as wide as OSMD's page limit allows; at its default (32767) a long
+    // song (Katedralen, 351 bars: eeron-omat-taskit#104) wrapped into rows the player did not
+    // follow. An SVG has no such limit.
+    this.osmd.EngravingRules.SheetMaximumWidth = ONE_LINE_MAX_WIDTH;
   }
 
   async load(musicXml: string, visible?: boolean[]): Promise<void> {
     const { xml, starts } = splitLongBars(musicXml);
     this.pieces = new BarMap(starts);
     this.container.dataset.pieces = String(this.pieces.pieces);
-    await this.osmd.load(xml);
+    // OSMD measures the lyrics as it lays out: the font has to be there by then.
+    await Promise.all([this.osmd.load(xml), loadScoreFont()]);
     if (visible) this.applyVisible(visible);
     this.render();
   }
@@ -174,8 +206,12 @@ export class Score {
     if (this.singleLine) {
       const want = cappedTargets(this.travels(), this.lengths());
       let factors = measures.map(() => 1);
+      let before: { factors: number[]; have: number[] } | undefined;
       while (this.widenings < 2 && needsWidening(this.travels(), want)) {
-        factors = nextFactors(factors, this.travels(), want);
+        const have = this.travels();
+        const next = nextFactors(factors, have, want, before);
+        before = { factors, have };
+        factors = next;
         measures.forEach((m, i) => { m.WidthFactor = factors[i] ?? 1; });
         this.layout();
         this.widenings++;
@@ -183,6 +219,10 @@ export class Score {
     }
     this.container.dataset.widenings = String(this.widenings);
     this.container.dataset.step = biggestStep(this.travels(), this.lengths()).toFixed(3);
+    // Each bar's drawn width per beat, for the tests: the step above is measured
+    // the way the widening measures, so it cannot catch a mistake in that (#75).
+    this.container.dataset.widths = this.bars
+      .map((bar) => (bar ? ((bar.x1 - bar.x0) / Math.max(bar.length, 1)).toFixed(1) : "")).join(" ");
   }
 
   private layout(): void {
@@ -223,7 +263,7 @@ export class Score {
     return { x0: centre - this.noteWidth, x1: centre + this.noteWidth, top: bar.top, bottom: bar.bottom };
   }
 
-  /** Where a part's staff is, in container pixels (meaningful in the one-line view). */
+  /** Where a staff is, by MusicXML part, in container pixels (meaningful in the one-line view). */
   partSpan(part: number): { top: number; bottom: number } | null {
     return this.spans.get(part) ?? null;
   }
@@ -254,9 +294,11 @@ export class Score {
 
   /**
    * Colours the notes sounding at this bar and beat, as the videos do: your part's
-   * notes full blue, everyone else's a lighter blue. Returns how many are lit.
+   * notes full blue, everyone else's a lighter blue. On a staff two parts share, yours
+   * are the notes in your voices. Returns how many are lit.
    */
-  light(songMeasure: number | null, songBeat: number, focusPart: number): number {
+  light(songMeasure: number | null, songBeat: number, focus: Focus): number {
+    const mine = (n: Sounding) => n.part === focus.staff && (!focus.voices || focus.voices.includes(n.voice));
     const at = songMeasure === null ? null : this.pieces.toPiece(songMeasure, songBeat);
     const bar = at ? this.bars[at.piece] : undefined;
     const beat = at?.beat ?? songBeat;
@@ -278,8 +320,8 @@ export class Score {
         }
         this.copies.set(n, lit);
       }
-      lit.copy.classList.toggle("lit-focus", n.part === focusPart);
-      lit.copy.classList.toggle("lit-other", n.part !== focusPart);
+      lit.copy.classList.toggle("lit-focus", mine(n));
+      lit.copy.classList.toggle("lit-other", !mine(n));
     }
     return now.length;
   }
@@ -390,14 +432,21 @@ export class Score {
         for (const entry of m.staffEntries) {
           const beat = entry.relInMeasureTimestamp.RealValue * 4;
           const x = px(entry.PositionAndShape.AbsolutePosition.x, dx);
-          byBeat.set(beat, Math.min(byBeat.get(beat) ?? x, x));
+          // A whole-bar rest is drawn in the middle of its bar, not where the bar's
+          // time begins. Counted, it made a bar of rests look half as wide as it is,
+          // so the widening doubled it (#75). A bar of only rests starts at its left
+          // edge (barAnchors), as the videos measured it.
+          const restOnly = entry.graphicalVoiceEntries.every((voice) =>
+            voice.notes.every((note) => note.sourceNote.IsWholeMeasureRest || note.sourceNote.isWholeRest()));
+          if (!restOnly) byBeat.set(beat, Math.min(byBeat.get(beat) ?? x, x));
           for (const voice of entry.graphicalVoiceEntries) {
             for (const note of voice.notes) {
               // Every VexFlow note can give its SVG group; the type only promises a GraphicalNote.
               const el = (note as unknown as { getSVGGElement?: () => SVGGElement | undefined })
                 .getSVGGElement?.();
               if (!el) continue;
-              notes.push({ part, start: beat, end: beat + note.sourceNote.Length.RealValue * 4, el });
+              const voiceId = voice.parentVoiceEntry?.ParentVoice?.VoiceId ?? 1;
+              notes.push({ part, voice: voiceId, start: beat, end: beat + note.sourceNote.Length.RealValue * 4, el });
             }
           }
         }

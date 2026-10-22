@@ -1,10 +1,12 @@
+import { AGENT_SESSION_SECONDS, agentKeyMark, agentSessionValid, readAgentLink } from "./agent";
 import { decideAccess, isAdmin, loadFacts, type Access } from "./access";
 import type { Env } from "./env";
+import { EVENT_MAX_BYTES, parseEvent, POPULAR_DAYS, POPULAR_MIN_SECONDS, SETTING_DEFAULTS, SETTING_NAMES } from "./events";
 import { serveObject, safeSongPath } from "./files";
 import { AUTHORIZE_URL, TOKEN_URL, authorizeUrl, exchangeCode, normalizeEmail, readEmail } from "./google";
 import { joinUrl, linkKey } from "./links";
 import { publicOrigin } from "./origin";
-import { isPdf, parseFlag, parseRequest, PDF_MAX_BYTES, requestPdfKey } from "./requests";
+import { isPdf, parseFlag, parseRequest, PDF_MAX_BYTES, pdfTitle, requestPdfKey } from "./requests";
 import { requestLang, serverMessage, type ServerLang } from "./messages";
 import { newPassphraseRecord, passphraseMatches } from "./passphrase";
 import { clearSessionCookie, readSession, sessionCookie, type Session } from "./session";
@@ -29,10 +31,10 @@ export default {
     if (url.pathname === "/health") return json({ ok: true });
     if (!env.SESSION_SECRET) return new Response("Not configured: SESSION_SECRET is missing", { status: 503 });
     const now = Math.floor(Date.now() / 1000);
-    const ctx: Ctx = {
-      env, request, url, now, secret: env.SESSION_SECRET,
-      session: await readSession(request, env.SESSION_SECRET, now),
-    };
+    let session = await readSession(request, env.SESSION_SECRET, now);
+    // An agent's session ends with the key that started it (#79).
+    if (session && !(await agentSessionValid(session, env.AGENT_LOGIN_SECRET))) session = null;
+    const ctx: Ctx = { env, request, url, now, secret: env.SESSION_SECRET, session };
     try {
       return await route(ctx);
     } catch (error) {
@@ -49,8 +51,13 @@ async function route(ctx: Ctx): Promise<Response> {
   const method = request.method;
   let m: RegExpExecArray | null;
 
+  // An agent's session (#79) only reads: no requests, flags or admin changes.
+  if (ctx.session?.agent && method !== "GET" && method !== "HEAD" && path !== "/auth/logout") {
+    return json({ error: "read-only" }, 403);
+  }
   if (path === "/" && method === "GET") return home(ctx);
   if (path === "/auth/login" && method === "GET") return login(ctx);
+  if (path === "/auth/agent" && method === "GET") return agentLogin(ctx);
   if (path === "/auth/callback" && method === "GET") return callback(ctx);
   if (path === "/auth/logout" && method === "POST") {
     return redirect("/", { "Set-Cookie": clearSessionCookie() });
@@ -76,12 +83,14 @@ async function route(ctx: Ctx): Promise<Response> {
     return choirPage(ctx, decodeURIComponent(m[1]!));
   }
   if (path === "/api/requests" && method === "POST") return sendRequest(ctx);
+  if (path === "/api/events" && method === "POST") return recordEvent(ctx);
   if (path === "/admin" && method === "GET") return adminPage(ctx);
   if (path === "/api/admin" && method === "GET") return adminState(ctx);
   if (path === "/api/admin/members" && method === "POST") return adminMembers(ctx);
   if (path === "/api/admin/link" && method === "POST") return adminLink(ctx);
   if (path === "/api/admin/setlists" && method === "POST") return adminSetlists(ctx);
   if (path === "/api/admin/requests" && method === "POST") return adminRequests(ctx);
+  if (path === "/api/admin/move" && method === "POST") return adminMove(ctx);
   if ((m = /^\/api\/admin\/requests\/(\d+)\/pdf$/.exec(path)) && method === "GET") return requestPdf(ctx, Number(m[1]));
   if (path.startsWith("/api/") || path.startsWith("/auth/") || path.startsWith("/files/") || path.startsWith("/sound/")) {
     return json({ error: "not found" }, 404);
@@ -188,6 +197,24 @@ async function callback(ctx: Ctx): Promise<Response> {
 }
 
 /**
+ * An agent's login link (#79). It starts a fresh one-hour session for the
+ * choirs it names, with no email and no links, so never an admin's.
+ */
+async function agentLogin(ctx: Ctx): Promise<Response> {
+  const secret = ctx.env.AGENT_LOGIN_SECRET;
+  if (!secret) return json({ error: "not found" }, 404);
+  const choirs = await readAgentLink(secret, ctx.url.searchParams.get("t"), ctx.now);
+  if (!choirs) return redirect(signinUrl("/", "failed"));
+  console.log("agent sign-in", JSON.stringify({ choirs, until: ctx.now + AGENT_SESSION_SECONDS }));
+  const next = ctx.url.searchParams.get("next");
+  const target = next ? safeNext(next) : `/c/${encodeURIComponent(choirs[0]!)}`;
+  return redirect(target, {
+    "Set-Cookie": await sessionCookie(ctx.secret, { agent: choirs, agentKey: await agentKeyMark(secret) }, ctx.now,
+      AGENT_SESSION_SECONDS),
+  });
+}
+
+/**
  * Signing in with Google while holding a choir's current link makes that
  * Google account a member, so the person stays in on every device and after
  * the link changes. Holding the link is the proof, as it is for the link itself.
@@ -235,6 +262,7 @@ async function me(ctx: Ctx): Promise<Response> {
   return json({
     email: ctx.session?.email ?? null,
     linked: Object.keys(ctx.session?.links ?? {}),
+    agent: ctx.session?.agent !== undefined,
     admin: await isAdmin(ctx.env.DB, ctx.session),
     choirs: await visibleChoirs(ctx),
     joinable: await joinableChoirs(ctx),
@@ -252,12 +280,14 @@ async function joinableChoirs(ctx: Ctx): Promise<string[]> {
 }
 
 /** Every choir this visitor may open, public ones included. */
-async function visibleChoirs(ctx: Ctx): Promise<{ id: string; name: string; public: boolean }[]> {
-  const { results } = await ctx.env.DB.prepare("SELECT id, name, public FROM choirs ORDER BY name").all<
-    { id: string; name: string; public: number }>();
+async function visibleChoirs(ctx: Ctx): Promise<{ id: string; name: string; public: boolean; staging: boolean }[]> {
+  const { results } = await ctx.env.DB.prepare("SELECT id, name, public, staging FROM choirs ORDER BY name").all<
+    { id: string; name: string; public: number; staging: number }>();
   const out = [];
   for (const row of results) {
-    if ((await accessTo(ctx, row.id)) === "ok") out.push({ id: row.id, name: row.name, public: row.public === 1 });
+    if ((await accessTo(ctx, row.id)) === "ok") {
+      out.push({ id: row.id, name: row.name, public: row.public === 1, staging: row.staging === 1 });
+    }
   }
   return out;
 }
@@ -267,6 +297,17 @@ const CREDITS = "composer, lyricist, arranger";
 interface SongRow {
   slug: string; title: string; parts: string; duration: number; published_at: string;
   composer: string | null; lyricist: string | null; arranger: string | null;
+}
+
+/** Songs in popularity order, those tied on people and listening time in one group. */
+export function popularGroups(rows: { song: string; people: number; seconds: number }[]): string[][] {
+  const groups: string[][] = [];
+  rows.forEach((r, i) => {
+    const prev = rows[i - 1];
+    if (prev && prev.people === r.people && prev.seconds === r.seconds) groups.at(-1)!.push(r.song);
+    else groups.push([r.song]);
+  });
+  return groups;
 }
 
 async function songList(ctx: Ctx, choir: string): Promise<Response> {
@@ -291,6 +332,15 @@ async function songList(ctx: Ctx, choir: string): Promise<Response> {
   const flags = await ctx.env.DB.prepare(
     "SELECT COUNT(*) AS n FROM song_requests WHERE choir = ? AND done_at IS NULL AND song IS NOT NULL",
   ).bind(choir).first<{ n: number }>();
+  // Songs popular lately (#89), most listened first: by people, then listening time. Only
+  // the order leaves here, never counts or names, so singers can't see who practised what.
+  // Songs tied on both share a group, which the list sorts by name in the singer's language.
+  const since = new Date((ctx.now - POPULAR_DAYS * 24 * 60 * 60) * 1000).toISOString();
+  const popular = await ctx.env.DB.prepare(
+    `SELECT song, COUNT(DISTINCT ${PERSON}) AS people, SUM(seconds) AS seconds FROM events
+      WHERE choir = ? AND name = 'listen' AND admin = 0 AND song IS NOT NULL AND seconds >= ? AND at >= ?
+      GROUP BY song ORDER BY people DESC, seconds DESC`,
+  ).bind(choir, POPULAR_MIN_SECONDS, since).all<{ song: string; people: number; seconds: number }>();
   // A song that has left the choir is skipped; the next save drops it for good.
   const slugs = new Set(results.map((r) => r.slug));
   return json({
@@ -301,6 +351,7 @@ async function songList(ctx: Ctx, choir: string): Promise<Response> {
     })),
     requests: requests.results.map((r) => ({ ...r, pdf: r.pdf === 1 })),
     openFlags: flags?.n ?? 0,
+    popular: popularGroups(popular.results.filter((r) => slugs.has(r.song))),
   });
 }
 
@@ -321,9 +372,34 @@ async function song(ctx: Ctx, choir: string, slug: string): Promise<Response> {
       WHERE choir = ? AND song = ? AND done_at IS NULL ORDER BY created_at DESC, id DESC`,
   ).bind(choir, slug).all<{ id: number; bar: number | null; problems: string | null; note: string | null;
     created_at: string }>();
+  // The voice tree (#107): which part names mean the same voice. A song still loads without it.
+  const voices = await ctx.env.DB.prepare("SELECT id, parent, name_fi, name_en, names FROM voices")
+    .all<VoiceRow>().then((r) => parseVoices(r.results), () => []);
   return json({
     ...song, parts: JSON.parse(row.parts), choir, base,
     flags: flags.results.map((f) => ({ ...f, problems: problemList(f.problems) })),
+    voices,
+  });
+}
+
+interface VoiceRow {
+  id: string;
+  parent: string | null;
+  name_fi: string;
+  name_en: string;
+  names: string;
+}
+
+/** The `voices` rows as the player reads them; a row whose names are not a JSON list of strings is left out. */
+export function parseVoices(rows: VoiceRow[]): { id: string; parent: string | null; fi: string; en: string; names: string[] }[] {
+  return rows.flatMap((r) => {
+    try {
+      const names: unknown = JSON.parse(r.names);
+      if (!Array.isArray(names) || !names.every((n) => typeof n === "string")) return [];
+      return [{ id: r.id, parent: r.parent, fi: r.name_fi, en: r.name_en, names }];
+    } catch {
+      return [];
+    }
   });
 }
 
@@ -355,7 +431,7 @@ async function adminState(ctx: Ctx): Promise<Response> {
   if (!(await isAdmin(ctx.env.DB, ctx.session))) return json({ error: "refused" }, 403);
   const db = ctx.env.DB;
   const [choirs, members, links, admins, requests] = await db.batch([
-    db.prepare("SELECT id, name, public FROM choirs ORDER BY name"),
+    db.prepare("SELECT id, name, public, staging FROM choirs ORDER BY name"),
     db.prepare("SELECT choir, email, added_at FROM members ORDER BY email"),
     db.prepare("SELECT choir, salt, hash, iterations, generation FROM choir_links WHERE hash IS NOT NULL"),
     db.prepare("SELECT email FROM admins ORDER BY email"),
@@ -369,7 +445,9 @@ async function adminState(ctx: Ctx): Promise<Response> {
     bar: number | null; problems: string | null; part: string | null };
   const origin = publicOrigin(ctx.url, ctx.request.headers, ctx.env);
   const out = [];
-  for (const c of (choirs!.results as { id: string; name: string; public: number }[]).filter((c) => c.public !== 1)) {
+  // The test list has no members, link or requests to manage (#73).
+  for (const c of (choirs!.results as { id: string; name: string; public: number; staging: number }[])
+    .filter((c) => c.public !== 1 && c.staging !== 1)) {
     const link = (links!.results as Link[]).find((l) => l.choir === c.id);
     // A link set by passphrase (set-passphrase.sh, or the old site's) works but
     // cannot be shown: only its hash is stored. "New link" replaces it.
@@ -389,7 +467,74 @@ async function adminState(ctx: Ctx): Promise<Response> {
   return json({
     choirs: out,
     admins: (admins!.results as { email: string }[]).map((a) => a.email),
+    ...(await usage(ctx)),
   });
+}
+
+/** How a usage event's person is counted: the Google email, else the device. */
+const PERSON = "COALESCE(email, visitor)";
+const USAGE_DAYS = 30;
+const EVENT_KEEP_DAYS = 365;
+const LATEST_LISTENS = 50;
+
+/**
+ * The admin page's usage numbers (eerovil/eeron-omat-taskit#72): per choir, the
+ * last 30 days' people at each step towards the singing and who saw the install
+ * notice and who use the installed app (#91); site-wide, how each
+ * setting is used; and the latest listens. Events over a year old go first.
+ */
+async function usage(ctx: Ctx) {
+  const db = ctx.env.DB;
+  const since = (days: number) => new Date((ctx.now - days * 24 * 60 * 60) * 1000).toISOString();
+  const from = since(USAGE_DAYS);
+  const person = "COALESCE(e.email, e.visitor)";
+  const sung = (where: string) => `COUNT(DISTINCT CASE WHEN e.sung = 1 AND ${where} THEN ${person} END)`;
+  const [, choirs, changed, listened, latest] = await db.batch([
+    db.prepare("DELETE FROM events WHERE at < ?").bind(since(EVENT_KEEP_DAYS)),
+    db.prepare(`SELECT e.choir AS id, COALESCE(c.name, e.choir) AS name,
+                       COUNT(DISTINCT ${person}) AS people,
+                       ${sung("e.name = 'song_open'")} AS songOpens,
+                       ${sung("e.name = 'settings_open'")} AS settingsOpens,
+                       ${sung("e.name = 'sound_choice' AND e.value = 'sung'")} AS choseSung,
+                       ${sung("e.name = 'listen' AND e.value = 'sung'")} AS playedSung,
+                       ${sung("e.name = 'listen' AND e.value = 'sung' AND e.seconds >= 60")} AS playedSungMinute,
+                       COUNT(DISTINCT CASE WHEN e.name = 'install_shown' THEN ${person} END) AS sawInstall,
+                       COUNT(DISTINCT CASE WHEN e.name IN ('install_accept', 'app_open') THEN ${person} END) AS installed
+                  FROM events e LEFT JOIN choirs c ON c.id = e.choir
+                 WHERE e.admin = 0 AND e.at >= ? GROUP BY e.choir ORDER BY name`).bind(from),
+    db.prepare(`SELECT setting, COUNT(DISTINCT ${PERSON}) AS people FROM events
+                 WHERE admin = 0 AND name = 'setting' AND at >= ? GROUP BY setting`).bind(from),
+    db.prepare(`SELECT json_each.key AS setting, json_each.value AS value, SUM(events.seconds) AS seconds
+                  FROM events, json_each(events.settings)
+                 WHERE events.admin = 0 AND events.name = 'listen' AND events.at >= ?
+                 GROUP BY json_each.key, json_each.value`).bind(from),
+    db.prepare(`SELECT e.at, e.choir, e.email, e.admin, e.song, s.title, e.part, e.value, e.seconds
+                  FROM events e LEFT JOIN songs s ON s.choir = e.choir AND s.slug = e.song
+                 WHERE e.name = 'listen' ORDER BY e.at DESC, e.id DESC LIMIT ?`).bind(LATEST_LISTENS),
+  ]);
+  const people = new Map((changed!.results as { setting: string; people: number }[]).map((r) => [r.setting, r.people]));
+  const time = listened!.results as { setting: string; value: string; seconds: number }[];
+  const settings = SETTING_NAMES.map((setting) => {
+    const rows = time.filter((r) => r.setting === setting);
+    const total = rows.reduce((sum, r) => sum + r.seconds, 0);
+    const others = rows.filter((r) => r.value !== SETTING_DEFAULTS[setting]).sort((a, b) => b.seconds - a.seconds);
+    const atDefault = total - others.reduce((sum, r) => sum + r.seconds, 0);
+    return {
+      setting,
+      default: SETTING_DEFAULTS[setting],
+      changedBy: people.get(setting) ?? 0,
+      /** The share of listening time at the default, 0–1; null with no listens yet. */
+      defaultShare: total ? atDefault / total : null,
+      topOther: others[0]?.value ?? null,
+    };
+  });
+  type Listen = { at: string; choir: string; email: string | null; admin: number; song: string | null;
+    title: string | null; part: string | null; value: string; seconds: number };
+  return {
+    usage: choirs!.results,
+    settings,
+    listens: (latest!.results as Listen[]).map((l) => ({ ...l, admin: l.admin === 1 })),
+  };
 }
 
 async function adminBody(ctx: Ctx): Promise<Record<string, unknown> | Response> {
@@ -406,11 +551,12 @@ async function adminBody(ctx: Ctx): Promise<Record<string, unknown> | Response> 
   return json({ error: "bad JSON" }, 400);
 }
 
+/** A choir with members of its own: not the open list, and not the test list (#73). */
 async function privateChoir(ctx: Ctx, choir: unknown): Promise<string | null> {
   if (typeof choir !== "string") return null;
-  const row = await ctx.env.DB.prepare("SELECT public FROM choirs WHERE id = ?").bind(choir)
-    .first<{ public: number }>();
-  return row && row.public !== 1 ? choir : null;
+  const row = await ctx.env.DB.prepare("SELECT public, staging FROM choirs WHERE id = ?").bind(choir)
+    .first<{ public: number; staging: number }>();
+  return row && row.public !== 1 && row.staging !== 1 ? choir : null;
 }
 
 /** Splits pasted text (one per line, commas, spaces) into emails. */
@@ -530,6 +676,90 @@ async function adminSetlists(ctx: Ctx): Promise<Response> {
   return json({ id });
 }
 
+// ---------------------------------------------------------------- the test list
+
+/**
+ * A list whose songs are always on another list too: every JOY-alumnit song is
+ * also JOY-kuoro's, but not the other way (eerovil/eeron-omat-taskit#101).
+ * scripts/publish-songs.mjs has the same ALSO_ON.
+ */
+export const ALSO_ON: Record<string, string> = { "joy-alumnit": "joy" };
+
+/**
+ * Moves a tried-out song from the test list to a choir's list (#73). Its files
+ * are copied to the choir's own folder first, since song-app deletes a
+ * version's files when it publishes to the test list again; then one D1 batch
+ * points the choir at the copy and takes the song off the test list. A song the
+ * choir already has is replaced, as a new publish would, and keeps its date.
+ */
+async function adminMove(ctx: Ctx): Promise<Response> {
+  const body = await adminBody(ctx);
+  if (body instanceof Response) return body;
+  const db = ctx.env.DB;
+  const from = typeof body.choir === "string" ? body.choir : "";
+  const to = typeof body.to === "string" ? body.to : "";
+  const slug = typeof body.slug === "string" ? body.slug : "";
+  const [source, target] = await db.batch<{ staging: number }>([
+    db.prepare("SELECT staging FROM choirs WHERE id = ?").bind(from),
+    db.prepare("SELECT staging FROM choirs WHERE id = ?").bind(to),
+  ]);
+  if (source!.results[0]?.staging !== 1 || target!.results[0]?.staging !== 0) {
+    return json({ error: "unknown choir" }, 400);
+  }
+  // A JOY-alumnit song goes on JOY-kuoro's list too, with the same files.
+  const lists = ALSO_ON[to] ? [to, ALSO_ON[to]] : [to];
+  const [song, ...replaced] = await db.batch<{ prefix: string }>([
+    db.prepare("SELECT prefix FROM songs WHERE choir = ? AND slug = ?").bind(from, slug),
+    ...lists.map((list) => db.prepare("SELECT prefix FROM songs WHERE choir = ? AND slug = ?").bind(list, slug)),
+  ]);
+  const prefix = song!.results[0]?.prefix;
+  if (!prefix) return json({ error: "unknown song" }, 400);
+  const oldPrefixes = [...new Set(replaced.map((r) => r.results[0]?.prefix).filter((p): p is string => !!p))];
+  const newPrefix = `songs/${to}/${slug}/${versionOf(prefix)}/`;
+
+  const keys = await listKeys(ctx.env.SONGS, prefix);
+  if (keys.length === 0) return json({ error: "no files" }, 409);
+  for (const key of keys) {
+    const object = await ctx.env.SONGS.get(key);
+    if (object === null) return json({ error: "no files" }, 409);
+    await ctx.env.SONGS.put(newPrefix + key.slice(prefix.length), await object.arrayBuffer(),
+      { httpMetadata: object.httpMetadata });
+  }
+  const now = new Date(ctx.now * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+  await db.batch([
+    ...lists.map((list) => db.prepare(
+      `INSERT INTO songs (choir, slug, title, prefix, parts, duration, published_at, ${CREDITS})
+       SELECT ?1, slug, title, ?2, parts, duration,
+              COALESCE((SELECT published_at FROM songs WHERE choir = ?1 AND slug = ?4), ?5), ${CREDITS}
+         FROM songs WHERE choir = ?3 AND slug = ?4
+       ON CONFLICT (choir, slug) DO UPDATE SET title = excluded.title, prefix = excluded.prefix,
+         parts = excluded.parts, duration = excluded.duration, composer = excluded.composer,
+         lyricist = excluded.lyricist, arranger = excluded.arranger`,
+    ).bind(list, newPrefix, from, slug, now)),
+    db.prepare("DELETE FROM songs WHERE choir = ? AND slug = ?").bind(from, slug),
+  ]);
+  // Nothing points at these any more. A replaced version's folder may still
+  // be another list's (one copy for several lists, #104); then it stays.
+  const stale = [...keys];
+  for (const old of oldPrefixes) {
+    if (old === newPrefix || await db.prepare("SELECT 1 FROM songs WHERE prefix = ? LIMIT 1").bind(old).first()) continue;
+    stale.push(...await listKeys(ctx.env.SONGS, old));
+  }
+  for (let i = 0; i < stale.length; i += 1000) await ctx.env.SONGS.delete(stale.slice(i, i + 1000));
+  return json({ moved: slug, to });
+}
+
+async function listKeys(bucket: R2Bucket, prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix, cursor });
+    keys.push(...page.objects.map((o) => o.key));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return keys;
+}
+
 // ---------------------------------------------------------------- requests
 
 /**
@@ -562,6 +792,8 @@ async function sendRequest(ctx: Ctx): Promise<Response> {
   const fields = Object.fromEntries([...form.entries()].filter(([, v]) => typeof v === "string"));
   const request = parseRequest(fields, pdf !== null, requestLang(ctx.request));
   if ("error" in request) return json(request, 400);
+  // Sent with only a PDF: its file name is the song's name (#77).
+  if (!request.title && file instanceof File && pdf) request.title = pdfTitle(file.name);
 
   const db = ctx.env.DB;
   const at = new Date(ctx.now * 1000).toISOString();
@@ -614,6 +846,32 @@ async function sendFlag(ctx: Ctx, choir: string, slug: string): Promise<Response
   ).bind(choir, song.title, flag.note, ctx.session?.email ?? flag.name, new Date(ctx.now * 1000).toISOString(),
     slug, flag.bar, flag.problems.join(",") || null, flag.part).first<{ id: number }>();
   return json({ id: row!.id });
+}
+
+/**
+ * One usage event from the player (eerovil/eeron-omat-taskit#72), sent with
+ * sendBeacon. Always 204: a bad event is dropped, and the player shows nothing.
+ * Kept only for a choir this visitor can open; the email comes from the session.
+ */
+async function recordEvent(ctx: Ctx): Promise<Response> {
+  const done = new Response(null, { status: 204 });
+  if (Number(ctx.request.headers.get("Content-Length") ?? 0) > EVENT_MAX_BYTES) return done;
+  const event = parseEvent(await ctx.request.text());
+  if (!event || (await accessTo(ctx, event.choir)) !== "ok") return done;
+  const session = ctx.session;
+  // Admins' visits are kept for checking that tracking works, but not counted. (An
+  // agent's session sends nothing: it only reads, #79.)
+  const admin = await isAdmin(ctx.env.DB, session);
+  // A listen is sent again at each full minute (D9): the same row grows.
+  await ctx.env.DB.prepare(
+    `INSERT INTO events (at, visitor, email, admin, choir, song, part, name, sung, setting, value, settings, seconds, listen)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (listen) DO UPDATE SET seconds = MAX(events.seconds, excluded.seconds), settings = excluded.settings
+       WHERE events.visitor = excluded.visitor`,
+  ).bind(new Date(ctx.now * 1000).toISOString(), event.visitor, session?.email ?? null, admin ? 1 : 0, event.choir,
+    event.song, event.part, event.name, event.sung ? 1 : 0, event.setting, event.value, event.settings, event.seconds,
+    event.listen).run();
+  return done;
 }
 
 function problemList(problems: string | null): string[] {

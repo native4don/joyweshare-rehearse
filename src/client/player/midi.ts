@@ -1,7 +1,10 @@
 import { BasicMIDI } from "spessasynth_core";
 import { Sequencer, WorkletSynthesizer } from "spessasynth_lib";
 import processorUrl from "spessasynth_lib/dist/spessasynth_processor.min.js?url";
+import { words } from "../i18n";
 import { DEFAULT_OTHERS, mixLevels } from "./mix";
+import { allowSilentMode } from "./session";
+import { boosts, findNotes, silenced, withoutNotes, type Notes, type UnisonNote } from "./unison";
 
 /**
  * The song's MIDI, played in the browser with MuseScore's own grand piano
@@ -61,12 +64,21 @@ export class MidiPlayer {
   private position = 0;
   private readonly meter: AnalyserNode;
   private readonly samples = new Float32Array(1024);
+  /** The notes left out of the song now playing (unison.ts). */
+  private gone = new Map<UnisonNote, UnisonNote>();
+  /** The notes struck louder, for a unison more than two parts sing. */
+  private louder = new Map<UnisonNote, number>();
+  private reloads = Promise.resolve();
+  /** While the song loads again: where it was and when (the context's clock). */
+  private reloading: { from: number; at: number } | null = null;
 
   private constructor(
     private readonly context: AudioContext,
     private readonly synth: WorkletSynthesizer,
     private readonly seq: Sequencer,
     private readonly channels: number[][],
+    private readonly midi: BasicMIDI,
+    private readonly notes: Notes,
   ) {
     seq.eventHandler.addEvent("songEnded", "stemmanauhat", () => {
       this.wanted = false;
@@ -94,6 +106,7 @@ export class MidiPlayer {
    * resumes it in play()).
    */
   static async create(midiUrl: string, partNames: string[], log: (m: string) => void = () => {}): Promise<MidiPlayer> {
+    allowSilentMode();
     const context = new AudioContext();
     soundfont ??= fetch(SOUNDFONT_URL).then((r) => {
       if (!r.ok) throw new Error(`piano: HTTP ${r.status}`);
@@ -109,19 +122,18 @@ export class MidiPlayer {
     ]);
     const synth = new WorkletSynthesizer(context);
     await synth.isReady;
-    log("Ladataan pianoa…");
+    log(words().loadingPiano);
     // A copy each time: the synth hands the buffer to its worklet, which detaches it, and a
     // second piano on the same page (Ääni back from Laulu, the next song) would get nothing.
     await synth.soundBankManager.addSoundBank((await soundfont).slice(0), "piano");
 
-    const channels = partChannels(BasicMIDI.fromArrayBuffer(midiBuffer.slice(0)), partNames);
+    const midi = BasicMIDI.fromArrayBuffer(midiBuffer.slice(0));
+    const channels = partChannels(midi, partNames);
     const seq = new Sequencer(synth, { skipToFirstNoteOn: false });
-    const loaded = new Promise<void>((resolve) => seq.eventHandler.addEvent("songChange", "load", () => resolve()));
-    seq.loadNewSongList([{ binary: midiBuffer, fileName: "score.mid" }]);
-    await loaded;
+    await load(seq, { binary: midiBuffer, fileName: "score.mid" });
     seq.pause();
     seq.currentTime = 0;
-    return new MidiPlayer(context, synth, seq, channels);
+    return new MidiPlayer(context, synth, seq, channels, midi, findNotes(midi, channels));
   }
 
   levels(): number[] {
@@ -134,34 +146,42 @@ export class MidiPlayer {
       chs.length ? (this.synth.midiChannels[chs[0]!]?.systemParameters.gain ?? 0) : this.levels()[i]!);
   }
 
-  setMaster(index: number): void { this.master = index; this.applyGains(); }
+  setMaster(index: number): void { this.master = index; this.applyGains(); this.applyUnisons(); }
   setOthers(level: number): void { this.others = level; this.applyGains(); }
   /** Whether your own part sounds ("Ilman omaa" turns it off). */
-  setOwn(on: boolean): void { this.own = on; this.applyGains(); }
+  setOwn(on: boolean): void { this.own = on; this.applyGains(); this.applyUnisons(); }
   get playing(): boolean { return this.wanted; }
   get running(): boolean { return this.wanted && !this.seq.paused; }
-  time(): number { return this.running ? this.seq.currentHighResolutionTime : this.position; }
+  time(): number {
+    const r = this.reloading;
+    if (r) return this.wanted ? r.from + (this.context.currentTime - r.at) * this.seq.playbackRate : r.from;
+    return this.running ? this.seq.currentHighResolutionTime : this.position;
+  }
 
   /**
    * Must be called straight from the singer's tap: iPhones let an audio context
    * start only from one, so resume() is called before anything is awaited.
    */
   async play(): Promise<void> {
+    allowSilentMode();
     const resumed = this.context.resume();
     this.wanted = true;
+    if (this.reloading) this.reloading = { from: this.position, at: this.context.currentTime };
     this.seq.currentTime = this.position;
     this.seq.play();
     await resumed;
   }
 
   pause(): void {
-    if (this.running) this.position = this.seq.currentHighResolutionTime;
+    if (this.wanted) this.position = this.time();
+    if (this.reloading) this.reloading = { from: this.position, at: this.context.currentTime };
     this.wanted = false;
     this.seq.pause();
   }
 
   seek(seconds: number): void {
     this.position = Math.max(0, seconds);
+    if (this.reloading) this.reloading = { from: this.position, at: this.context.currentTime };
     this.seq.currentTime = this.position;
   }
 
@@ -183,10 +203,41 @@ export class MidiPlayer {
     void this.context.close();
   }
 
+  /**
+   * Which part sings each unison depends on your part, so the song is loaded
+   * again without the others' copies when that changes, at the same place.
+   */
+  private applyUnisons(): void {
+    this.reloads = this.reloads.then(async () => {
+      const gone = silenced(this.notes, this.master, this.own);
+      const louder = boosts(this.notes, this.master, this.own);
+      if (gone.size === this.gone.size && [...gone.keys()].every((n) => this.gone.has(n))
+        && louder.size === this.louder.size && [...louder].every(([n, db]) => this.louder.get(n) === db)) return;
+      this.gone = gone;
+      this.louder = louder;
+      this.reloading = { from: this.time(), at: this.context.currentTime };
+      try {
+        await load(this.seq, withoutNotes(this.midi, gone.keys(), this.notes, louder));
+        const t = this.time();
+        this.seq.currentTime = t;
+        if (this.wanted) this.seq.play();
+        else { this.seq.pause(); this.position = t; }
+      } finally {
+        this.reloading = null;
+      }
+    }).catch((error: unknown) => console.warn(`unisons not applied: ${String(error)}`));
+  }
+
   private applyGains(): void {
     const levels = this.levels();
     this.channels.forEach((chs, i) => {
       for (const ch of chs) this.synth.midiChannels[ch]?.setSystemParameter("gain", levels[i]!);
     });
   }
+}
+
+function load(seq: Sequencer, song: BasicMIDI | { binary: ArrayBuffer; fileName: string }): Promise<void> {
+  const loaded = new Promise<void>((resolve) => seq.eventHandler.addEvent("songChange", "load", () => resolve()));
+  seq.loadNewSongList([song]);
+  return loaded;
 }

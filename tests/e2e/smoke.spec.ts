@@ -246,6 +246,24 @@ test("the song list sorts by name or newest first, and remembers the choice", as
   await expect(titles).toHaveText(["Aamulaulu", "Bassojen laulu", "Iltalaulu"]);
 });
 
+test("Suositut puts songs tied on listeners and listening time in name order (#89)", async ({ page }) => {
+  await page.route("**/api/songs?choir=jm", async (route) => {
+    const data = await (await route.fetch()).json();
+    const song = data.songs[0];
+    data.songs = [["d", "Ävemaria"], ["b", "Bassojen laulu"], ["a", "Aamulaulu"], ["c", "Iltalaulu"], ["e", "Zeta"]]
+      .map(([slug, title]) => ({ ...song, slug, title }));
+    // Iltalaulu first; Zeta, Ävemaria and Bassojen laulu tied; the rest not listened to.
+    data.popular = [["c"], ["e", "d", "b"]];
+    await route.fulfill({ json: data });
+  });
+  await signInAs(page, "/c/jm", "laulaja@example.com");
+  await expect(page.getByRole("group", { name: "Järjestys" }).getByRole("button", { name: "Suositut" }))
+    .toHaveAttribute("aria-pressed", "true");
+  // Finnish puts Ä after Z.
+  await expect(page.locator(".songs .song-title"))
+    .toHaveText(["Iltalaulu", "Bassojen laulu", "Zeta", "Ävemaria", "Aamulaulu"]);
+});
+
 test("the old passphrase link gets in without a Google account", async ({ page }) => {
   await page.goto(`/?user=jm&passphrase=${PASSPHRASE}`);
   await expect(page).toHaveURL(/\/c\/jm$/);
@@ -293,6 +311,44 @@ test("a singer whose choir part is split (Tenorib) starts on Tenori in a song wi
   await expect(page.getByRole("dialog", { name: "Valitse oma stemma" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Vaihda oma stemma" })).toContainText("Tenorib");
   await expect(gains(page)).toHaveAttribute("data-gains", "0.160 1.000");
+});
+
+test("a singer of Basso 2 starts on Basso in a song not divided, and keeps Basso 2 (#107)", async ({ page }) => {
+  await page.goto("/c/public");
+  await page.evaluate(() => localStorage.setItem("stemmanauhat:public:part", "Basso 2"));
+  await page.goto("/c/public/esittely");
+  await expect(page.getByTestId("score").locator("svg").first()).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Valitse oma stemma" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Vaihda oma stemma" })).toContainText("Basso");
+  await expect(gains(page)).toHaveAttribute("data-gains", "0.160 1.000");
+
+  // Picking Basso by hand saves it for this song, and the choir part stays Basso 2.
+  await page.getByRole("button", { name: "Vaihda oma stemma" }).click();
+  await page.getByRole("dialog", { name: "Valitse oma stemma" }).getByRole("button", { name: "Basso" }).click();
+  expect(await page.evaluate(() => localStorage.getItem("stemmanauhat:public:part"))).toBe("Basso 2");
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("stemmanauhat:song:public/esittely") ?? "{}").part))
+    .toBe("Basso");
+});
+
+test("parts show by their place's own name, whatever the song calls them (#107)", async ({ page }) => {
+  await page.route("**/api/songs/public/esittely", async (route) => {
+    const data = await (await route.fetch()).json();
+    data.parts = [{ name: "T1" }, { name: "Bass 2" }];
+    await route.fulfill({ json: data });
+  });
+  await page.goto("/c/public");
+  await page.evaluate(() => localStorage.setItem("stemmanauhat:public:part", "Basso 2"));
+  await page.goto("/c/public/esittely");
+  await expect(page.getByTestId("score").locator("svg").first()).toBeVisible();
+  await expect(page.locator(".own-name")).toHaveText("Basso 2");
+  await page.getByRole("button", { name: "Vaihda oma stemma" }).click();
+  await expect(page.getByRole("dialog", { name: "Valitse oma stemma" }).getByRole("button"))
+    .toHaveText(["Tenori 1", "Basso 2"]);
+
+  await page.evaluate(() => localStorage.setItem("stemmanauhat:lang", "en"));
+  await page.reload();
+  await expect(page.getByTestId("score").locator("svg").first()).toBeVisible();
+  await expect(page.locator(".own-name")).toHaveText("Bass 2");
 });
 
 test("the public demo opens without signing in", async ({ page }) => {
