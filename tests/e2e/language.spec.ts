@@ -5,12 +5,15 @@ import { PASSPHRASE } from "./helpers";
 // Finnish browser (playwright.config.ts); these run with an English one.
 test.use({ locale: "en-US" });
 
-const GUIDES_URL = "https://joyweshare.org/using-the-practice-tracks/";
-const CREDITS_URL = "https://joyweshare.org/credits/";
+// The footer's pages on joyweshare.org, one per language.
+const FOOTER = {
+  en: { guides: "https://joyweshare.org/guide/", credits: "https://joyweshare.org/credits/" },
+  fi: { guides: "https://joyweshare.org/opas/", credits: "https://joyweshare.org/tekijat/" },
+};
 
-// The footer's two links, each opening joyweshare.org in a new tab.
-async function expectFooter(page: Page, guides: string, credits: string) {
-  const links: [string, string][] = [[guides, GUIDES_URL], [credits, CREDITS_URL]];
+// The footer's two links, each opening its language's page in a new tab.
+async function expectFooter(page: Page, lang: "en" | "fi", guides: string, credits: string) {
+  const links: [string, string][] = [[guides, FOOTER[lang].guides], [credits, FOOTER[lang].credits]];
   for (const [name, href] of links) {
     const link = page.getByRole("link", { name, exact: true });
     await expect(link).toHaveAttribute("href", href);
@@ -44,16 +47,16 @@ test("an English browser gets the song list in English, with US dates and Englis
   await expect(page.locator(".songs .date")).toHaveText(["10/5/2026", "9/1/2026", "8/1/2026"]);
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
   // The footer: Guides and Credits; no source-code link.
-  await expectFooter(page, "Guides", "Credits");
+  await expectFooter(page, "en", "Guides", "Credits");
   await expect(page.getByRole("link", { name: "Source code" })).toHaveCount(0);
 });
 
 test("the signed-out front page and sign-in page show Guides and Credits", async ({ page }) => {
   await page.goto("/?lang=fi");
-  await expectFooter(page, "Ohjeet", "Tekijät");
+  await expectFooter(page, "fi", "Ohjeet", "Tekijät");
   await expect(page.getByRole("link", { name: "Lähdekoodi" })).toHaveCount(0);
   await page.goto("/signin?lang=en");
-  await expectFooter(page, "Guides", "Credits");
+  await expectFooter(page, "en", "Guides", "Credits");
   await expect(page.getByRole("link", { name: "Source code" })).toHaveCount(0);
 });
 
