@@ -16,7 +16,7 @@ const LOCALES: Record<Lang, string> = { fi: "fi-FI", en: "en-US" };
 const STORAGE_KEY = "stemmanauhat:lang";
 
 const fi = {
-  siteName: "Stemmanauhat",
+  siteName: "JoyWeShare Rehearse",
   language: "Kieli",
   signOut: "Kirjaudu ulos",
   signInGoogle: "Kirjaudu Google-tilillä",
@@ -46,7 +46,7 @@ const fi = {
     other: "Muu",
   },
 
-  homeOpenHint: "Tekijänoikeusvapaita kuorolauluja kaikille. Valitse laulu ja harjoittele omaa stemmaasi.",
+  homeOpenHint: "Harjoittele omaa stemmaasi omin päin, milloin vain.",
   homeMembersHint: "Kuoron jäsen? Kirjaudu, niin näet oman kuorosi laulut.",
   signedInAs: (email: string) => `Kirjautuneena: ${email}`,
 
@@ -54,8 +54,8 @@ const fi = {
   signinFailed: "Kirjautuminen ei onnistunut. Yritä uudelleen.",
   signinOldLink: "Kuoron vanha linkki toimii edelleen ilman Google-tiliä.",
   tryDemo: "Kokeile esittelykappaleita",
-  madeBy: "Tekijä:",
-  sourceCode: "Lähdekoodi",
+  guides: "Ohjeet",
+  credits: "Tekijät",
 
   notFound: "Tätä sivua ei löytynyt.",
   toHome: "Etusivulle",
@@ -67,8 +67,8 @@ const fi = {
 
   joinText: "Pääsit sisään linkillä. Lisää Google-tilisi kuoron jäseneksi, niin pysyt kirjautuneena kaikilla laitteillasi.",
   joinButton: "Lisää Google-tili",
-  installText: "Asenna Stemmanauhat puhelimeesi sovellukseksi, niin se aukeaa suoraan kotinäytöltä.",
-  installIosText: "Lisää Stemmanauhat kotinäytölle, niin se aukeaa kuin sovellus: napauta Jaa ja valitse Lisää Koti-valikkoon.",
+  installText: "Asenna JoyWeShare Rehearse puhelimeesi sovellukseksi, niin se aukeaa suoraan kotinäytöltä.",
+  installIosText: "Lisää JoyWeShare Rehearse kotinäytölle, niin se aukeaa kuin sovellus: napauta Jaa ja valitse Lisää Koti-valikkoon.",
   installButton: "Asenna",
   notNow: "Ei nyt",
   continueFrom: "Jatka siitä",
@@ -251,7 +251,7 @@ const fi = {
 export type Messages = typeof fi;
 
 const en: Messages = {
-  siteName: "Stemmanauhat",
+  siteName: "JoyWeShare Rehearse",
   language: "Language",
   signOut: "Sign out",
   signInGoogle: "Sign in with Google",
@@ -281,7 +281,7 @@ const en: Messages = {
     other: "Other",
   },
 
-  homeOpenHint: "Choir songs free of copyright, for everyone. Choose a song and practice your part.",
+  homeOpenHint: "Rehearse your part on your own, anytime.",
   homeMembersHint: "In a choir? Sign in to see your choir's songs.",
   signedInAs: (email: string) => `Signed in as ${email}`,
 
@@ -289,8 +289,8 @@ const en: Messages = {
   signinFailed: "Signing in didn't work. Please try again.",
   signinOldLink: "Your choir's link still works without a Google account.",
   tryDemo: "Try the demo songs",
-  madeBy: "Made by",
-  sourceCode: "Source code",
+  guides: "Guides",
+  credits: "Credits",
 
   notFound: "This page wasn't found.",
   toHome: "Home page",
@@ -302,8 +302,8 @@ const en: Messages = {
 
   joinText: "You came in with the choir's link. Add your Google account to the choir to stay signed in on all your devices.",
   joinButton: "Add Google account",
-  installText: "Install Stemmanauhat as an app, so it opens straight from your home screen.",
-  installIosText: "Add Stemmanauhat to your Home Screen to open it like an app: tap Share, then Add to Home Screen.",
+  installText: "Install JoyWeShare Rehearse as an app, so it opens straight from your home screen.",
+  installIosText: "Add JoyWeShare Rehearse to your Home Screen to open it like an app: tap Share, then Add to Home Screen.",
   installButton: "Install",
   notNow: "Not now",
   continueFrom: "Continue",
