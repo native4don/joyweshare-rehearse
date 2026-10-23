@@ -7,8 +7,8 @@ test.use({ locale: "en-US" });
 
 // The footer's pages on joyweshare.org, one per language.
 const FOOTER = {
-  en: { guides: "https://joyweshare.org/guide/", credits: "https://joyweshare.org/credits/" },
-  fi: { guides: "https://joyweshare.org/opas/", credits: "https://joyweshare.org/tekijat/" },
+  en: { guides: "https://joyweshare.org/guides/", credits: "https://joyweshare.org/credits/" },
+  fi: { guides: "https://joyweshare.org/oppaat/", credits: "https://joyweshare.org/tekijat/" },
 };
 
 // The footer's two links, each opening its language's page in a new tab.

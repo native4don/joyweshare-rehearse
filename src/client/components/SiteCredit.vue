@@ -5,8 +5,8 @@ import { computed } from "vue";
 import { lang, t } from "../i18n";
 
 const PAGES = {
-  en: { guides: "https://joyweshare.org/guide/", credits: "https://joyweshare.org/credits/" },
-  fi: { guides: "https://joyweshare.org/opas/", credits: "https://joyweshare.org/tekijat/" },
+  en: { guides: "https://joyweshare.org/guides/", credits: "https://joyweshare.org/credits/" },
+  fi: { guides: "https://joyweshare.org/oppaat/", credits: "https://joyweshare.org/tekijat/" },
 } as const;
 
 const pages = computed(() => PAGES[lang.value]);
