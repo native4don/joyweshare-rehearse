@@ -24,7 +24,7 @@ describe("the phrase table", () => {
 
   it("keeps the Finnish exactly as the screens had it", () => {
     const fi = MESSAGES.fi;
-    expect(fi.siteName).toBe("Stemmanauhat");
+    expect(fi.siteName).toBe("JoyWeShare Rehearse");
     expect(fi.searchSongs).toBe("Hae kappaletta");
     expect([fi.popular, fi.byName, fi.newest]).toEqual(["Suositut", "Nimi", "Uusimmat"]);
     expect(fi.noSongs).toBe("Ei vielä kappaleita.");
@@ -42,9 +42,39 @@ describe("the phrase table", () => {
     expect(fi.loadingParts).toBe("Ladataan stemmoja…");
   });
 
-  it("keeps the home page's line, with its English translation", () => {
-    expect(MESSAGES.fi.homeOpenHint).toBe("Tekijänoikeusvapaita kuorolauluja kaikille. Valitse laulu ja harjoittele omaa stemmaasi.");
-    expect(MESSAGES.en.homeOpenHint).toBe("Choir songs free of copyright, for everyone. Choose a song and practice your part.");
+  it("names the site JoyWeShare Rehearse, with this site's own home page line", () => {
+    for (const lang of ["fi", "en"] as const) expect(MESSAGES[lang].siteName, lang).toBe("JoyWeShare Rehearse");
+    expect(MESSAGES.en.homeOpenHint).toBe("Rehearse your part on your own, anytime.");
+    expect(MESSAGES.fi.homeOpenHint).toBe("Harjoittele omaa stemmaasi omin päin, milloin vain.");
+  });
+
+  it("attributes accurately, in either language: no copyright claim on the home page", () => {
+    for (const lang of ["fi", "en"] as const) {
+      const line = MESSAGES[lang].homeOpenHint.toLowerCase();
+      expect(line, lang).not.toContain("copyright");
+      expect(line, lang).not.toContain("tekijänoikeu");
+    }
+  });
+
+  it("offers to install JoyWeShare Rehearse, in both languages", () => {
+    for (const lang of ["fi", "en"] as const) {
+      expect(MESSAGES[lang].installText, lang).toContain("JoyWeShare Rehearse");
+      expect(MESSAGES[lang].installIosText, lang).toContain("JoyWeShare Rehearse");
+    }
+  });
+
+  it("labels the footer's two links, Guides and Credits, and names Stemmanauhat nowhere on the site", () => {
+    expect(MESSAGES.en.guides).toBe("Guides");
+    expect(MESSAGES.fi.guides).toBe("Ohjeet");
+    expect(MESSAGES.en.credits).toBe("Credits");
+    expect(MESSAGES.fi.credits).toBe("Tekijät");
+    for (const lang of ["fi", "en"] as const) {
+      for (const [key, value] of Object.entries(MESSAGES[lang])) {
+        const text = typeof value === "function" ? (value as (...a: unknown[]) => string)("X", 2, 3)
+          : typeof value === "object" ? JSON.stringify(value) : value;
+        expect(text, `${lang}.${key}`).not.toContain("Stemmanauhat");
+      }
+    }
   });
 });
 

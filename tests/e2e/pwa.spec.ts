@@ -70,6 +70,8 @@ test("without a network a page shows the offline page, and comes back", async ({
   await context.setOffline(true);
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "Ei verkkoyhteyttä" })).toBeVisible();
+  await expect(page.getByText("JoyWeShare Rehearse tarvitsee verkkoyhteyden")).toBeVisible();
+  await expect(page.getByText("JoyWeShare Rehearse needs a connection")).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/c/public");
 
   await context.setOffline(false);

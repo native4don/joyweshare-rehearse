@@ -1,9 +1,22 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { PASSPHRASE } from "./helpers";
 
 // The site in English and Finnish. The other browser tests run with a
 // Finnish browser (playwright.config.ts); these run with an English one.
 test.use({ locale: "en-US" });
+
+const GUIDES_URL = "https://joyweshare.org/using-the-practice-tracks/";
+const CREDITS_URL = "https://joyweshare.org/credits/";
+
+// The footer's two links, each opening joyweshare.org in a new tab.
+async function expectFooter(page: Page, guides: string, credits: string) {
+  const links: [string, string][] = [[guides, GUIDES_URL], [credits, CREDITS_URL]];
+  for (const [name, href] of links) {
+    const link = page.getByRole("link", { name, exact: true });
+    await expect(link).toHaveAttribute("href", href);
+    await expect(link).toHaveAttribute("target", "_blank");
+  }
+}
 
 test("an English browser gets the song list in English, with US dates and English sorting", async ({ page }) => {
   await page.route("**/api/songs?choir=jm", async (route) => {
@@ -18,7 +31,7 @@ test("an English browser gets the song list in English, with US dates and Englis
   });
   await page.goto(`/?user=jm&passphrase=${PASSPHRASE}`);
   await expect(page).toHaveURL(/\/c\/jm$/);
-  await expect(page).toHaveTitle("Stemmanauhat");
+  await expect(page).toHaveTitle("JoyWeShare Rehearse");
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(page.getByRole("searchbox", { name: "Search for a song" })).toBeVisible();
   await expect(page.getByText("You came in with the choir's link.")).toBeVisible();
@@ -30,20 +43,18 @@ test("an English browser gets the song list in English, with US dates and Englis
   await order.getByRole("button", { name: "Newest" }).click();
   await expect(page.locator(".songs .date")).toHaveText(["10/5/2026", "9/1/2026", "8/1/2026"]);
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
-  // The site's maker and its source code (#119).
-  await expect(page.getByText("Made by Eero Vilpponen")).toBeVisible();
-  const source = page.getByRole("link", { name: "Source code" });
-  await expect(source).toHaveAttribute("href", "https://github.com/eerovil/stemmanauhat-cf");
-  await expect(source).toHaveAttribute("target", "_blank");
+  // The footer: Guides and Credits; no source-code link.
+  await expectFooter(page, "Guides", "Credits");
+  await expect(page.getByRole("link", { name: "Source code" })).toHaveCount(0);
 });
 
-test("the signed-out front page and sign-in page name the maker and link the source code (#119)", async ({ page }) => {
+test("the signed-out front page and sign-in page show Guides and Credits", async ({ page }) => {
   await page.goto("/?lang=fi");
-  await expect(page.getByText("Tekijä: Eero Vilpponen")).toBeVisible();
-  await expect(page.getByRole("link", { name: "Lähdekoodi" }))
-    .toHaveAttribute("href", "https://github.com/eerovil/stemmanauhat-cf");
+  await expectFooter(page, "Ohjeet", "Tekijät");
+  await expect(page.getByRole("link", { name: "Lähdekoodi" })).toHaveCount(0);
   await page.goto("/signin?lang=en");
-  await expect(page.getByRole("link", { name: "Source code" })).toBeVisible();
+  await expectFooter(page, "Guides", "Credits");
+  await expect(page.getByRole("link", { name: "Source code" })).toHaveCount(0);
 });
 
 test("the language can be switched, is remembered on the device, and ?lang= overrides it", async ({ page }) => {
@@ -71,7 +82,7 @@ test("the player's part question and settings are in English", async ({ page }) 
   await expect(dialog.getByRole("heading", { name: "Which part do you sing?" })).toBeVisible();
   // The song's "Tenori" shows by its place's English name in the voice tree (#107).
   await dialog.getByRole("button", { name: "Tenor", exact: true }).click();
-  await expect(page).toHaveTitle("Kokeilulaulu – Stemmanauhat");
+  await expect(page).toHaveTitle("Kokeilulaulu – JoyWeShare Rehearse");
   await page.getByRole("button", { name: "Got it" }).click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const listen = page.getByRole("group", { name: "How you listen" });

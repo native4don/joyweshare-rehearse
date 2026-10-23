@@ -7,7 +7,7 @@ import { signInAs } from "./helpers";
 
 const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) "
   + "Version/18.0 Mobile/15E148 Safari/604.1";
-const TEXT = "Asenna Stemmanauhat puhelimeesi sovellukseksi";
+const TEXT = "Asenna JoyWeShare Rehearse puhelimeesi sovellukseksi";
 const IOS_TEXT = "napauta Jaa ja valitse Lisää Koti-valikkoon";
 
 /** Offers the page an install prompt as Chrome would; `outcome` is what the singer picks in it. */
