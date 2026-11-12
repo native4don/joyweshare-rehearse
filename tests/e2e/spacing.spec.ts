@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
-import { choosePartIfAsked, PASSPHRASE, playAndSeeCursorMove } from "./helpers";
+import { choosePartIfAsked, PASSPHRASE, playAndSeeCursorMove, withoutSavedWidths } from "./helpers";
 
 test("the one-line view widens the bars around a crowded one, as the videos do", async ({ page }) => {
+  // Another test may have saved this song's bar widths (#137): widen from scratch here.
+  await withoutSavedWidths(page, "/api/songs/jm/epatasainen");
   await page.goto(`/?user=jm&passphrase=${PASSPHRASE}`);
   await page.getByRole("link", { name: "Epätasainen" }).click();
   await choosePartIfAsked(page, "Tenori");
@@ -24,8 +26,11 @@ test("the one-line view widens the bars around a crowded one, as the videos do",
   await page.getByRole("button", { name: "Säädöt" }).click();
   await page.getByRole("group", { name: "Viivastot" }).getByRole("button", { name: "Oma" }).click();
   await expect(score).toHaveAttribute("data-widenings", "0");
+  // Back in "Kaikki", the widths worked out above are used: one layout, nothing to widen (#137).
   await page.getByRole("group", { name: "Viivastot" }).getByRole("button", { name: "Kaikki" }).click();
-  await expect(score).toHaveAttribute("data-widenings", /^[12]$/);
+  await expect(score).toHaveAttribute("data-layouts", "1");
+  await expect(score).toHaveAttribute("data-widenings", "0");
+  expect(Number(await score.getAttribute("data-step"))).toBeLessThanOrEqual(1.3 * 1.05);
   await page.locator(".backdrop").click({ position: { x: 100, y: 100 } });
 
   await playAndSeeCursorMove(page);
@@ -56,4 +61,18 @@ test("the score is laid out alike on a phone without Times New Roman (#86)", asy
     };
   });
   expect(await widthsOn()).toBe(here);
+});
+
+test("long syllables on short notes do not spread their bar out (#127)", async ({ page }) => {
+  await page.goto("/c/public/pitkat-tavut");
+  // The song's four staves are named in its score; its row, like every seeded song's, lists Tenori and Basso.
+  await choosePartIfAsked(page, "Tenori");
+  const score = page.getByTestId("score");
+  await expect(score).toHaveAttribute("data-widths", /\d/);
+
+  // Bar 5 is shaped like bar 54 of a real song: parts coming in late on sixteenths
+  // with long syllables. With OSMD's full room after each, it was drawn about 2.4
+  // times as wide per beat as the plain bars that open the song; with half, 1.3.
+  const widths = (await score.getAttribute("data-widths"))!.split(" ").map(Number);
+  expect(widths[4]!).toBeLessThanOrEqual(Math.max(widths[0]!, widths[1]!) * 1.5);
 });
